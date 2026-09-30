@@ -71,6 +71,8 @@
     <br>
     <button id="mount">Mount</button>
     <button id="dismount" disabled>Dismount</button>
+    <button id="day">Day</button>
+    <button id="night">Night</button>
     <div id="status">Ground view</div>
 </div>
 
@@ -137,17 +139,18 @@ document.body.appendChild(vrButton);
    
 const textureLoader = new THREE.TextureLoader();
 
-const grassTexture = textureLoader.load(
-    "./grass.jpg",
-    () => console.log("GRASS LOADED"),
-    undefined,
-    (error) => console.error("GRASS FAILED TO LOAD", error)
-);
+const grassTexture = textureLoader.load("./grass.jpg");
 
 grassTexture.colorSpace = THREE.SRGBColorSpace;
 grassTexture.wrapS = THREE.RepeatWrapping;
 grassTexture.wrapT = THREE.RepeatWrapping;
 grassTexture.repeat.set(35, 35);
+
+const concreteNormal = textureLoader.load("./concretenormal.jpg");
+
+concreteNormal.wrapS = THREE.RepeatWrapping;
+concreteNormal.wrapT = THREE.RepeatWrapping;
+concreteNormal.repeat.set(8, 8);
 
 const mat = {
     grass: new THREE.MeshStandardMaterial({
@@ -158,12 +161,14 @@ const mat = {
 
     concrete: new THREE.MeshStandardMaterial({
         color: 0x777b80,
-        roughness: .8
+        roughness: .8,
+        normalMap: concreteNormal,
+        normalScale: new THREE.Vector2(0.5, 0.5)
     }),
 
     metal: new THREE.MeshStandardMaterial({
         color: 0x697586,
-        metalness: .75,
+        metalness: .85,
         roughness: .3
     }),
 
@@ -182,25 +187,15 @@ const mat = {
         roughness: .5
     }),
 
-    white: new THREE.MeshStandardMaterial({
-        color: 0xf4eee2,
-        roughness: .65
-    }),
-
     dark: new THREE.MeshStandardMaterial({
         color: 0x222936,
-        metalness: .35,
+        metalness: .55,
         roughness: .45
-    }),
-
-    wood: new THREE.MeshStandardMaterial({
-        color: 0x9b6033,
-        roughness: .9
     }),
 
     gold: new THREE.MeshStandardMaterial({
         color: 0xd5a82c,
-        metalness: .65,
+        metalness: .95,
         roughness: .25
     }),
 
@@ -297,18 +292,6 @@ function cylinder(radius, height, material, segments = 16) {
     return mesh;
 }
 
-function sphere(radius, material, segments = 12) {
-    const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(radius, segments, segments / 2),
-        material
-    );
-
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-
-    return mesh;
-}
-
 
 /* ============================================================
    GROUND AND FAIRGROUND
@@ -373,6 +356,7 @@ for (let i = 0; i < 32; i++) {
 }
 
 scene.add(fence);
+
 
 /* ============================================================
    FERRIS WHEEL ROOT
@@ -492,6 +476,43 @@ for (let i = 0; i < 12; i++) {
     spoke.rotation.z = i * Math.PI / 6;
 
     wheel.add(spoke);
+
+    /* Small glowing bulb on each spoke */
+    const bulb = new THREE.Mesh(
+        new THREE.SphereGeometry(.18, 12, 8),
+        mat.lightBulb
+    );
+
+/*
+    Position the bulb near the outer end of the spoke.
+    The spoke is 21 units long, so its end is about 10.5
+    units from the center.
+*/
+    const bulbDistance = 7.8;
+
+    bulb.position.set(
+        Math.sin(i * Math.PI / 6) * bulbDistance,
+        Math.cos(i * Math.PI / 6) * bulbDistance,
+        0.3
+    );
+
+    bulb.castShadow = false;
+    bulb.receiveShadow = false;
+
+    wheel.add(bulb);
+
+
+/* Small point light creates the glow around the bulb */
+    const bulbLight = new THREE.PointLight(
+        0xffdd66,
+        30.5,
+        25.8,
+        2
+    );
+
+    bulbLight.position.copy(bulb.position);
+
+    wheel.add(bulbLight);
 }
 
 
@@ -594,23 +615,6 @@ for (let i = 0; i < GONDOLA_COUNT; i++) {
 
     gondola.add(riderCamera);
 
-
-    /*
-        A small point light is attached to the gondola.
-        This demonstrates a light rig riding along with
-        a hierarchy rather than existing in world space.
-    */
-    const gondolaLight = new THREE.PointLight(
-        0xffe8a0,
-        2.2,
-        7
-    );
-
-    gondolaLight.position.set(0, .8, .2);
-
-    gondola.add(gondolaLight);
-
-
     gondolas.push({
         pivot: gondolaPivot,
         gondola: gondola,
@@ -703,6 +707,52 @@ dismountButton.addEventListener("click", () => {
 
     status.textContent = "Ground view";
 });
+
+/* ============================================================
+   DAY/NIGHT
+   ============================================================ */
+
+const dayButton = document.getElementById("day");
+const nightButton = document.getElementById("night");
+
+
+/* Day/night lighting */
+function setDayMode() {
+    sun.visible = true;
+
+    point1.visible = true;
+    point2.visible = true;
+    spot.visible = true;
+
+    scene.background.set(0x87b8e8);
+    scene.fog.color.set(0x87b8e8);
+
+    status.textContent =
+        mounted ? "Riding — Day mode" : "Ground view — Day mode";
+}
+
+
+function setNightMode() {
+    sun.visible = false;
+
+    /*
+        Keep the local attraction lights active at night.
+        The glowing bulbs will therefore stand out.
+    */
+    point1.visible = true;
+    point2.visible = true;
+    spot.visible = true;
+
+    scene.background.set(0x07111f);
+    scene.fog.color.set(0x07111f);
+
+    status.textContent =
+        mounted ? "Riding — Night mode" : "Ground view — Night mode";
+}
+
+
+dayButton.addEventListener("click", setDayMode);
+nightButton.addEventListener("click", setNightMode);
 
 
 /* ============================================================
