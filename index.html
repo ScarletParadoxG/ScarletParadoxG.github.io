@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ferris Wheel Carnival - WebXR</title>
+
+<style>
+    html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #101827;
+        font-family: system-ui, sans-serif;
+    }
+
+    #info {
+        position: fixed;
+        left: 18px;
+        top: 18px;
+        z-index: 10;
+        color: white;
+        background: rgba(10,18,30,.78);
+        border: 1px solid rgba(255,255,255,.2);
+        border-radius: 10px;
+        padding: 12px 14px;
+        line-height: 1.35;
+        max-width: 280px;
+        user-select: none;
+    }
+
+    #info strong {
+        display: block;
+        margin-bottom: 5px;
+    }
+
+    button {
+        border: 0;
+        border-radius: 7px;
+        padding: 9px 13px;
+        margin: 7px 5px 0 0;
+        color: white;
+        background: #2463d4;
+        cursor: pointer;
+        font-weight: 600;
+    }
+
+    button:hover {
+        background: #3476ed;
+    }
+
+    button:disabled {
+        opacity: .45;
+        cursor: default;
+    }
+
+    #status {
+        margin-top: 7px;
+        font-size: 13px;
+        color: #cbd5e1;
+    }
+</style>
+</head>
+
+<body>
+
+<div id="info">
+    <strong>🎡 Carnival Ferris Wheel</strong>
+    Mount to ride. Dismount to return to the ground view.
+    <br>
+    <button id="mount">Mount</button>
+    <button id="dismount" disabled>Dismount</button>
+    <div id="status">Ground view</div>
+</div>
+
+<!--
+    Three.js is the only external dependency.
+    WebXR is provided by Three.js' WebGLRenderer and VRButton.
+-->
+<script type="module">
+
+import * as THREE from
+    "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
+
+import { VRButton } from
+    "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/webxr/VRButton.js";
+
+
+/* ============================================================
+   BASIC SETUP
+   ============================================================ */
+
+const scene = new THREE.Scene();
+
+scene.background = new THREE.Color(0x87b8e8);
+scene.fog = new THREE.Fog(0x87b8e8, 55, 150);
+
+const camera = new THREE.PerspectiveCamera(
+    65,
+    window.innerWidth / window.innerHeight,
+    0.05,
+    250
+);
+
+camera.position.set(24, 9, 28);
+
+const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    powerPreference: "high-performance"
+});
+
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType("local-floor");
+
+document.body.appendChild(renderer.domElement);
+
+
+/* WebXR entry button. No controller interaction is implemented. */
+const vrButton = VRButton.createButton(renderer);
+vrButton.style.bottom = "18px";
+vrButton.style.right = "18px";
+vrButton.style.left = "auto";
+document.body.appendChild(vrButton);
+
+
+/* ============================================================
+   MATERIALS
+   ============================================================ */
+   
+const textureLoader = new THREE.TextureLoader();
+
+const grassTexture = textureLoader.load(
+    "./grass.jpg",
+    () => console.log("GRASS LOADED"),
+    undefined,
+    (error) => console.error("GRASS FAILED TO LOAD", error)
+);
+
+grassTexture.colorSpace = THREE.SRGBColorSpace;
+grassTexture.wrapS = THREE.RepeatWrapping;
+grassTexture.wrapT = THREE.RepeatWrapping;
+grassTexture.repeat.set(35, 35);
+
+const mat = {
+    grass: new THREE.MeshStandardMaterial({
+        map: grassTexture,
+        roughness: .95,
+        metalness: 0.0
+    }),
+
+    concrete: new THREE.MeshStandardMaterial({
+        color: 0x777b80,
+        roughness: .8
+    }),
+
+    metal: new THREE.MeshStandardMaterial({
+        color: 0x697586,
+        metalness: .75,
+        roughness: .3
+    }),
+
+    red: new THREE.MeshStandardMaterial({
+        color: 0xd83b3b,
+        roughness: .55
+    }),
+
+    yellow: new THREE.MeshStandardMaterial({
+        color: 0xffc928,
+        roughness: .5
+    }),
+
+    blue: new THREE.MeshStandardMaterial({
+        color: 0x2674c9,
+        roughness: .5
+    }),
+
+    white: new THREE.MeshStandardMaterial({
+        color: 0xf4eee2,
+        roughness: .65
+    }),
+
+    dark: new THREE.MeshStandardMaterial({
+        color: 0x222936,
+        metalness: .35,
+        roughness: .45
+    }),
+
+    wood: new THREE.MeshStandardMaterial({
+        color: 0x9b6033,
+        roughness: .9
+    }),
+
+    gold: new THREE.MeshStandardMaterial({
+        color: 0xd5a82c,
+        metalness: .65,
+        roughness: .25
+    }),
+
+    lightBulb: new THREE.MeshStandardMaterial({
+        color: 0xffffcc,
+        emissive: 0xffdd66,
+        emissiveIntensity: 2.2
+    })
+};
+
+
+/* ============================================================
+   LIGHTING
+   ============================================================ */
+
+/*
+    Directional light:
+    behaves like the sun and creates the major shadow structure.
+*/
+const sun = new THREE.DirectionalLight(0xfff1d0, 3.2);
+sun.position.set(-30, 30, 20);
+sun.castShadow = true;
+
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -60;
+sun.shadow.camera.right = 60;
+sun.shadow.camera.top = 60;
+sun.shadow.camera.bottom = -60;
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 140;
+
+scene.add(sun);
+
+
+/*
+    Point lights provide local highlights around the attraction.
+*/
+const point1 = new THREE.PointLight(0xffcc77, 20, 35, 2);
+point1.position.set(0, 12, 0);
+scene.add(point1);
+
+const point2 = new THREE.PointLight(0x77aaff, 13, 30, 2);
+point2.position.set(14, 5, 5);
+scene.add(point2);
+
+
+/*
+    Spotlights provide directional highlights on the ride.
+*/
+const spot = new THREE.SpotLight(
+    0xffffff,
+    45,
+    70,
+    Math.PI / 7,
+    .45,
+    1.5
+);
+
+spot.position.set(18, 28, 20);
+spot.target.position.set(0, 8, 0);
+
+spot.castShadow = true;
+spot.shadow.mapSize.set(1024, 1024);
+
+scene.add(spot);
+scene.add(spot.target);
+
+
+/* ============================================================
+   HELPERS
+   ============================================================ */
+
+function box(w, h, d, material, cast = true, receive = true) {
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        material
+    );
+
+    mesh.castShadow = cast;
+    mesh.receiveShadow = receive;
+
+    return mesh;
+}
+
+function cylinder(radius, height, material, segments = 16) {
+    const mesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(radius, radius, height, segments),
+        material
+    );
+
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    return mesh;
+}
+
+function sphere(radius, material, segments = 12) {
+    const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, segments, segments / 2),
+        material
+    );
+
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    return mesh;
+}
+
+
+/* ============================================================
+   GROUND AND FAIRGROUND
+   ============================================================ */
+
+const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(180, 180),
+    mat.grass
+);
+
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+
+/* Concrete ride pad */
+const pad = new THREE.Mesh(
+    new THREE.CylinderGeometry(17, 17, .35, 48),
+    mat.concrete
+);
+
+pad.position.y = .18;
+pad.receiveShadow = true;
+scene.add(pad);
+
+
+/* Surrounding fairground path */
+const path = new THREE.Mesh(
+    new THREE.RingGeometry(20, 30, 64),
+    new THREE.MeshStandardMaterial({
+        color: 0xc7b89b,
+        roughness: .95,
+        side: THREE.DoubleSide
+    })
+);
+
+path.rotation.x = -Math.PI / 2;
+path.position.y = .03;
+path.receiveShadow = true;
+scene.add(path);
+
+
+/* ============================================================
+   SIMPLE CARNIVAL FENCE
+   ============================================================ */
+
+const fence = new THREE.Group();
+
+for (let i = 0; i < 32; i++) {
+
+    const a = (i / 32) * Math.PI * 2;
+
+    const post = cylinder(.13, 1.4, mat.dark, 8);
+
+    post.position.set(
+        Math.cos(a) * 22,
+        .7,
+        Math.sin(a) * 22
+    );
+
+    fence.add(post);
+}
+
+scene.add(fence);
+
+/* ============================================================
+   FERRIS WHEEL ROOT
+   ============================================================ */
+
+/*
+    Transform hierarchy:
+
+       ferrisRide
+           |
+           +-- wheel
+                 |
+                 +-- gondolaPivot
+                       |
+                       +-- gondola
+                             |
+                             +-- riderCamera
+                                   |
+                                   +-- camera
+
+    The gondolaPivot rotates opposite the wheel.
+    Therefore the gondola stays level.
+*/
+
+const ferrisRide = new THREE.Group();
+
+ferrisRide.position.set(0, 2, 0);
+
+scene.add(ferrisRide);
+
+
+/* ============================================================
+   FERRIS WHEEL SUPPORT STRUCTURE
+   ============================================================ */
+
+const supportLeft = new THREE.Group();
+const supportRight = new THREE.Group();
+
+supportLeft.position.set(1, 8, 8);
+supportRight.position.set(1, 8, -8);
+
+ferrisRide.add(supportLeft);
+ferrisRide.add(supportRight);
+
+
+/* angled support legs */
+function addSupportLeg(parent, x, z) {
+
+    const leg = box(.75, 18, .75, mat.metal);
+
+    leg.position.set(x, -1, z);
+    leg.rotation.z = x > 0 ? -.20 : .20;
+
+    parent.add(leg);
+}
+
+addSupportLeg(supportLeft, 0, 0);
+addSupportLeg(supportRight, 0, 0);
+
+
+/* hub axle */
+const axle = new THREE.Mesh(
+    new THREE.CylinderGeometry(
+        .65, .65, 18, 20
+    ),
+    mat.dark
+);
+
+axle.rotation.x = Math.PI / 2;
+axle.position.set(0, 13, 0);
+
+axle.castShadow = true;
+axle.receiveShadow = true;
+
+ferrisRide.add(axle);
+
+
+/* ============================================================
+   ROTATING WHEEL
+   ============================================================ */
+
+const wheel = new THREE.Group();
+
+wheel.position.set(0, 13, 0);
+
+ferrisRide.add(wheel);
+
+
+/* Main wheel ring */
+const outerRing = new THREE.Mesh(
+    new THREE.TorusGeometry(10.5, .28, 10, 64),
+    mat.gold
+);
+
+outerRing.castShadow = true;
+outerRing.receiveShadow = true;
+
+wheel.add(outerRing);
+
+/* Central hub */
+const hub = cylinder(1.25, 1.4, mat.gold, 20);
+hub.rotation.x = Math.PI / 2;
+wheel.add(hub);
+
+
+/* ============================================================
+   WHEEL SPOKES
+   ============================================================ */
+
+for (let i = 0; i < 12; i++) {
+
+    const spoke = box(.22, 21, .22, mat.metal);
+
+    // Center the entire spoke on the axle/hub.
+    spoke.position.set(0, 0, 0);
+
+    spoke.rotation.z = i * Math.PI / 6;
+
+    wheel.add(spoke);
+}
+
+
+/* ============================================================
+   GONDOLAS
+   ============================================================ */
+
+const gondolas = [];
+
+const GONDOLA_COUNT = 12;
+
+for (let i = 0; i < GONDOLA_COUNT; i++) {
+
+    const angle =
+        (i / GONDOLA_COUNT) * Math.PI * 2;
+
+    /*
+        Leveling pivot.
+
+        The pivot is a child of the rotating wheel,
+        so it automatically inherits wheel rotation.
+
+        We then apply the inverse wheel rotation to
+        the pivot every frame.
+    */
+    const gondolaPivot = new THREE.Group();
+
+    gondolaPivot.rotation.z = -angle;
+
+    gondolaPivot.position.set(
+        Math.sin(angle) * 10,
+        Math.cos(angle) * 10,
+        1
+    );
+
+    wheel.add(gondolaPivot);
+
+
+    /* The actual gondola */
+    const gondola = new THREE.Group();
+
+    gondolaPivot.add(gondola);
+
+
+    /* cabin */
+    const cabin = new THREE.Mesh(
+        new THREE.BoxGeometry(2.3, 1.7, 1.6),
+        mat.blue
+    );
+
+    cabin.castShadow = true;
+    cabin.receiveShadow = true;
+
+    cabin.position.y = -.1;
+
+    gondola.add(cabin);
+
+
+    /* roof */
+    const roof = box(
+        2.55,
+        .18,
+        1.85,
+        mat.red
+    );
+
+    roof.position.y = .85;
+
+    gondola.add(roof);
+
+
+    /* seats */
+    const seat = box(
+        1.5,
+        .28,
+        .65,
+        mat.yellow
+    );
+
+    seat.position.set(0, -.35, .1);
+
+    gondola.add(seat);
+
+    /*
+        Rider camera.
+
+        It is a child of the gondola, which makes this
+        camera inherit BOTH:
+
+        1. Ferris wheel rotation
+        2. Gondola leveling transform
+    */
+    const riderCamera = new THREE.Group();
+
+    riderCamera.position.set(
+        0,
+        .25,
+        .2
+    );
+
+    gondola.add(riderCamera);
+
+
+    /*
+        A small point light is attached to the gondola.
+        This demonstrates a light rig riding along with
+        a hierarchy rather than existing in world space.
+    */
+    const gondolaLight = new THREE.PointLight(
+        0xffe8a0,
+        2.2,
+        7
+    );
+
+    gondolaLight.position.set(0, .8, .2);
+
+    gondola.add(gondolaLight);
+
+
+    gondolas.push({
+        pivot: gondolaPivot,
+        gondola: gondola,
+        camera: riderCamera
+    });
+}
+
+
+/* ============================================================
+   RIDER CAMERA
+   ============================================================ */
+
+let mounted = false;
+
+const groundPosition = new THREE.Vector3(
+    24,
+    8,
+    27
+);
+
+const groundLookAt = new THREE.Vector3(
+    0,
+    9,
+    0
+);
+
+
+/*
+    We use the first gondola as the rider's seat.
+
+    Because riderCamera is in the hierarchy, the normal
+    camera becomes a child of it when mounted.
+*/
+const rider = gondolas[0].camera;
+
+
+/* ============================================================
+   MOUNT
+   ============================================================ */
+
+const mountButton = document.getElementById("mount");
+const dismountButton = document.getElementById("dismount");
+const status = document.getElementById("status");
+
+mountButton.addEventListener("click", () => {
+
+    if (mounted) return;
+
+    mounted = true;
+
+    /*
+        Camera becomes a child of the rider seat.
+        This is the important hierarchy requirement.
+    */
+    rider.add(camera);
+
+    camera.position.set(0, 0, -.4);
+    camera.rotation.set(0, 85.4, 0);
+
+    mountButton.disabled = true;
+    dismountButton.disabled = false;
+
+    status.textContent =
+        "Riding — camera is attached to the gondola";
+});
+
+
+/* ============================================================
+   DISMOUNT
+   ============================================================ */
+
+dismountButton.addEventListener("click", () => {
+
+    if (!mounted) return;
+
+    mounted = false;
+
+    /*
+        Remove camera from the ride hierarchy and return
+        it to the scene.
+    */
+    scene.add(camera);
+
+    camera.position.copy(groundPosition);
+
+    camera.lookAt(groundLookAt);
+
+    mountButton.disabled = false;
+    dismountButton.disabled = true;
+
+    status.textContent = "Ground view";
+});
+
+
+/* ============================================================
+   MOTION
+   ============================================================ */
+
+const clock = new THREE.Clock();
+
+function animate() {
+
+    const dt = Math.min(clock.getDelta(), .05);
+
+    /*
+        Wheel motion is calculated every frame.
+
+        No baked animation clip is used.
+    */
+    wheel.rotation.z += dt * .28;
+
+
+    /*
+        Every gondola receives the inverse wheel rotation.
+
+        Since the pivot is already inheriting wheel.rotation.z,
+        this keeps the gondola visually level.
+    */
+    for (const g of gondolas) {
+
+        /*
+            The local rotation is the negative of the parent's
+            current wheel rotation.
+
+            This is deliberately computed each frame.
+        */
+        g.pivot.rotation.z = -wheel.rotation.z;
+
+        /*
+            The gondalas sway slightly
+        */
+        const sway = Math.sin(clock.elapsedTime * 1.2 * 0.8) * 0.06;
+
+        g.gondola.rotation.z = sway;
+    }
+
+    /*
+        When mounted, the camera is transformed automatically
+        by its parent hierarchy.
+
+        When not mounted, it remains at the ground position.
+    */
+    if (!mounted) {
+
+        camera.position.lerp(
+            groundPosition,
+            1 - Math.pow(.001, dt)
+        );
+
+        camera.lookAt(groundLookAt);
+    }
+
+
+    renderer.render(scene, camera);
+}
+
+renderer.setAnimationLoop(animate);
+
+
+/* ============================================================
+   RESIZE
+   ============================================================ */
+
+window.addEventListener("resize", () => {
+
+    camera.aspect =
+        window.innerWidth / window.innerHeight;
+
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(
+        window.innerWidth,
+        window.innerHeight
+    );
+});
+
+</script>
+</body>
+</html>
