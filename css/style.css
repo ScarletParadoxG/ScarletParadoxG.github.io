@@ -159,6 +159,30 @@ h1 { margin: 0; font-size: 30px; line-height: 1.15; }
 }
 #actions button { flex: 1; }
 
+/* Fixed to the middle of the screen. The shot ray is computed to pass through this exact point. */
+#crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+#crosshair::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: #fff;
+}
+
 #arrow {
   position: absolute;
   top: 50%;

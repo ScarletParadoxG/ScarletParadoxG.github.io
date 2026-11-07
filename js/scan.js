@@ -57,18 +57,18 @@ export class SurfaceMap {
     return counts;
   }
 
-  // The lowest level with real support. Tables only count as floor if the floor was never scanned.
-  floorY(minCells = 3, binSize = 0.1) {
+  // The outermost level with real support, ignoring stray hits.
+  level(kind, minCells = 3, binSize = 0.1) {
     const bins = new Map();
     for (const cell of this.cells.values()) {
-      if (cell.kind !== 'up') continue;
+      if (cell.kind !== kind) continue;
       const bin = Math.round(cell.pos.y / binSize);
       const entry = bins.get(bin) || { count: 0, sum: 0 };
       entry.count++;
       entry.sum += cell.pos.y;
       bins.set(bin, entry);
     }
-    const levels = [...bins.keys()].sort((a, b) => a - b);
+    const levels = [...bins.keys()].sort((a, b) => (kind === 'up' ? a - b : b - a));
     for (const level of levels) {
       const entry = bins.get(level);
       if (entry.count >= minCells) return entry.sum / entry.count;
@@ -76,19 +76,36 @@ export class SurfaceMap {
     return null;
   }
 
-  // Cells far enough from the viewer, with enough nearby coplanar cells for a rift to fit,
+  // Tables only count as floor if the floor was never scanned.
+  floorY() {
+    return this.level('up');
+  }
+
+  ceilingY() {
+    return this.level('down');
+  }
+
+  // Wall cells far enough from the viewer, with enough nearby coplanar cells for a rift to fit,
   // and clear of corners, so a rift's hole doesn't spill past the edge of its surface.
+  // Floors and ceilings can't host rifts, but they still count when checking for corners.
   // `clearance` should exceed the rift's outer radius. Two cells are needed to reject a spot,
   // so one noisy hit can't rule it out.
+  // A scan rarely covers the floor right beside a wall, so height is limited separately:
+  // by the floor and ceiling levels once known, and by the phone's height until then.
   candidates(viewerPos, {
-    minDist = 1, maxDist = 7, support = 3, radius = 0.5, planeTolerance = 0.08,
-    clearance = 0.55, maxConflicts = 1,
+    minDist = 1, maxDist = 7, support = 3, radius = 0.3, planeTolerance = 0.08,
+    clearance = 0.3, maxConflicts = 1, levelClearance = 0.35, unknownLevelRange = 1,
   } = {}) {
     const cells = [...this.cells.values()];
     const delta = new THREE.Vector3();
     const radiusSq = radius * radius;
     const clearanceSq = clearance * clearance;
+    const floor = this.floorY();
+    const ceiling = this.ceilingY();
+    const minY = floor === null ? viewerPos.y - unknownLevelRange : floor + levelClearance;
+    const maxY = ceiling === null ? viewerPos.y + unknownLevelRange : ceiling - levelClearance;
     return cells.filter((cell) => {
+      if (cell.kind !== 'wall' || cell.pos.y < minY || cell.pos.y > maxY) return false;
       const dist = Math.hypot(cell.pos.x - viewerPos.x, cell.pos.z - viewerPos.z);
       if (dist < minDist || dist > maxDist) return false;
       let neighbours = 0;
@@ -113,10 +130,8 @@ export class SurfaceMap {
   }
 }
 
-const KIND_BONUS = { wall: 0.6, down: 0.5, up: 0.15 };
-
-// Greedy but random: each pick favors walls and directions not yet used, so ghosts come from all around.
-export function selectRifts(candidates, viewerPos, count, { minSpacing = 2, random = Math.random } = {}) {
+// Greedy but random: each pick favors directions and heights not yet used, so ghosts come from all around.
+export function selectRifts(candidates, viewerPos, count, { minSpacing = 1.3, random = Math.random } = {}) {
   const azimuth = (cell) => Math.atan2(cell.pos.x - viewerPos.x, cell.pos.z - viewerPos.z);
   const chosen = [];
 
@@ -127,14 +142,15 @@ export function selectRifts(candidates, viewerPos, count, { minSpacing = 2, rand
       if (chosen.some((c) => c.pos.distanceTo(cell.pos) < minSpacing)) continue;
 
       let separation = 0.5;
+      let heightSpread = 0.5;
       if (chosen.length) {
         separation = Math.min(...chosen.map((c) => {
           const diff = Math.abs(azimuth(c) - azimuth(cell)) % (Math.PI * 2);
           return Math.min(diff, Math.PI * 2 - diff) / Math.PI;
         }));
+        heightSpread = Math.min(1, Math.min(...chosen.map((c) => Math.abs(c.pos.y - cell.pos.y))));
       }
-      const repeat = cell.kind !== 'wall' && chosen.some((c) => c.kind === cell.kind) ? 0.4 : 0;
-      const score = separation + KIND_BONUS[cell.kind] - repeat + random() * 0.5;
+      const score = separation + heightSpread * 0.4 + random() * 0.5;
       if (score > bestScore) {
         bestScore = score;
         best = cell;

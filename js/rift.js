@@ -2,9 +2,9 @@
 // The rift's local +Y axis is the surface normal, pointing into the room.
 import * as THREE from './three.js';
 
-const HOLE_RADIUS = 0.42;
-const OCCLUDER_HALF_SIZE = 0.9;   // Keep below half of the minimum rift spacing in scan.js.
-const TUNNEL_DEPTH = 0.8;
+const HOLE_RADIUS = 0.16;
+const OCCLUDER_HALF_SIZE = 0.6;   // Keep below half of the minimum rift spacing in scan.js.
+const TUNNEL_DEPTH = 0.25;        // Shallow, so it stays behind the occluder at steep viewing angles.
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
@@ -123,7 +123,7 @@ export function createRift(position, normal, kind) {
   group.add(glow);
 
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(HOLE_RADIUS - 0.015, HOLE_RADIUS + 0.045, 48),
+    new THREE.RingGeometry(HOLE_RADIUS - 0.006, HOLE_RADIUS + 0.018, 48),
     new THREE.MeshBasicMaterial({ color: 0xc8b6ff, transparent: true, depthWrite: false, side: THREE.DoubleSide }),
   );
   ring.rotation.x = -Math.PI / 2;

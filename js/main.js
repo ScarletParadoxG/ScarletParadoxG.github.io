@@ -1,5 +1,5 @@
 import * as THREE from './three.js';
-import { SurfaceMap, selectRifts } from './scan.js';
+import { SurfaceMap, selectRifts, classify } from './scan.js';
 import { createRift, anchorRift, updateRift, setRiftDebug, destroyRift } from './rift.js';
 import { Ghost } from './ghost.js';
 import { SpatialAudio } from './audio.js';
@@ -21,6 +21,9 @@ const G = {
   rifts: [],
   ghosts: [],
   floorY: null,
+  centerHit: null,
+  scanStart: 0,
+  align: { poseDeg: 0, poseCm: 0, aimDeg: 0, hitDeg: null, maxPoseDeg: 0, maxHitDeg: 0 },
   tapMode: false,
   pending: [],
   spawnTimer: 2,
@@ -55,6 +58,7 @@ const V = {
   quat: new THREE.Quaternion(),
   scale: new THREE.Vector3(),
   fwd: new THREE.Vector3(0, 0, -1),
+  aim: new THREE.Vector3(0, 0, -1),    // Through the middle of the screen. Differs from fwd if the camera lens is off center.
   up: new THREE.Vector3(0, 1, 0),
   right: new THREE.Vector3(1, 0, 0),
 };
@@ -63,6 +67,11 @@ const tmpA = new THREE.Vector3();
 const tmpB = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
 const hitMatrix = new THREE.Matrix4();
+const inverseProjection = new THREE.Matrix4();
+const poseMatrix = new THREE.Matrix4();
+const posePos = new THREE.Vector3();
+
+const MAX_CENTER_HIT_DEG = 6;   // A hit further than this from the crosshair isn't "under" it.
 
 let renderer = null;
 const scene = new THREE.Scene();
@@ -89,7 +98,7 @@ crosshair.visible = false;
 scene.add(crosshair);
 
 const reticle = new THREE.Mesh(
-  new THREE.RingGeometry(0.1, 0.12, 32).rotateX(-Math.PI / 2),
+  new THREE.RingGeometry(0.14, 0.16, 32).rotateX(-Math.PI / 2),
   new THREE.MeshBasicMaterial({ color: 0x8cf0c0, transparent: true, depthWrite: false, side: THREE.DoubleSide }),
 );
 reticle.matrixAutoUpdate = false;
@@ -215,7 +224,10 @@ async function startSession(session) {
   $('menu').hidden = true;
   $('ar-ui').hidden = false;
   setState('scanning');
-  crosshair.visible = true;
+  G.scanStart = performance.now();
+  // The screen-fixed crosshair can't drift, so the 3D one is only for apps without an overlay.
+  $('crosshair').hidden = G.overlay === 'none';
+  crosshair.visible = G.overlay === 'none';
   renderer.setAnimationLoop(onFrame);
 }
 
@@ -273,6 +285,7 @@ function onSessionEnd() {
   G.surfaces = new SurfaceMap();
   G.candidateCount = 0;
   G.floorY = null;
+  G.centerHit = null;
   G.tapMode = false;
   G.pending = [];
   G.session = null;
@@ -290,6 +303,7 @@ function onSessionEnd() {
 
   document.documentElement.classList.remove('in-ar');
   $('ar-ui').hidden = true;
+  $('crosshair').hidden = true;
   $('arrow').hidden = true;
   $('menu').hidden = false;
   setState('menu');
@@ -320,12 +334,7 @@ function onFrame(time, frame) {
   updateTracking(tracked);
 
   if (pose) {
-    V.known = true;
-    V.matrix.fromArray(pose.transform.matrix);
-    V.matrix.decompose(V.pos, V.quat, V.scale);
-    V.fwd.set(0, 0, -1).applyQuaternion(V.quat);
-    V.up.set(0, 1, 0).applyQuaternion(V.quat);
-    V.right.set(1, 0, 0).applyQuaternion(V.quat);
+    updateViewer(pose);
     audio.setListener(V.pos, V.fwd, V.up);
 
     readHits(frame, refSpace);
@@ -347,6 +356,34 @@ function onFrame(time, frame) {
   renderer.render(scene, camera);
 }
 
+// Uses the view the picture is drawn from, since some runtimes report a different pose.transform.
+function updateViewer(pose) {
+  const view = pose.views[0];
+  V.known = true;
+  V.matrix.fromArray((view?.transform ?? pose.transform).matrix);
+  V.matrix.decompose(V.pos, V.quat, V.scale);
+  V.fwd.set(0, 0, -1).applyQuaternion(V.quat);
+  V.up.set(0, 1, 0).applyQuaternion(V.quat);
+  V.right.set(1, 0, 0).applyQuaternion(V.quat);
+
+  // Run the middle of the screen back through the projection to get the true aim ray.
+  V.aim.copy(V.fwd);
+  if (view?.projectionMatrix) {
+    inverseProjection.fromArray(view.projectionMatrix).invert();
+    tmpA.set(0, 0, -1).applyMatrix4(inverseProjection).normalize();
+    if (tmpA.z < 0 && Number.isFinite(tmpA.x + tmpA.y + tmpA.z)) V.aim.copy(tmpA).applyQuaternion(V.quat);
+  }
+
+  // Reported in diagnostics, to show how far this runtime's poses disagree.
+  poseMatrix.fromArray(pose.transform.matrix);
+  posePos.setFromMatrixPosition(poseMatrix);
+  tmpA.setFromMatrixColumn(poseMatrix, 2).negate().normalize();
+  G.align.poseDeg = THREE.MathUtils.radToDeg(tmpA.angleTo(V.fwd));
+  G.align.poseCm = posePos.distanceTo(V.pos) * 100;
+  G.align.aimDeg = THREE.MathUtils.radToDeg(V.aim.angleTo(V.fwd));
+  G.align.maxPoseDeg = Math.max(G.align.maxPoseDeg, G.align.poseDeg);
+}
+
 function updateTracking(tracked) {
   const next = tracked ? 'ok' : 'lost';
   if (next === G.tracking) return;
@@ -356,6 +393,8 @@ function updateTracking(tracked) {
 }
 
 function readHits(frame, refSpace) {
+  let closest = null;
+  let closestDeg = Infinity;
   G.rays.forEach((ray, index) => {
     ray.hit = null;
     const results = frame.getHitTestResults(ray.source);
@@ -367,21 +406,38 @@ function readHits(frame, refSpace) {
     const position = new THREE.Vector3().setFromMatrixPosition(hitMatrix);
     // WebXR defines the pose's Y axis as the surface normal.
     const normal = new THREE.Vector3().setFromMatrixColumn(hitMatrix, 1).normalize();
-    ray.hit = { result: results[0], position, normal, distance: position.distanceTo(V.pos) };
+    const hit = {
+      result: results[0], position, normal, matrix: hitMatrix.clone(), distance: position.distanceTo(V.pos),
+    };
+    ray.hit = hit;
 
     const cell = G.surfaces.add(position, normal, V.pos);
     if (cell?.hits === 1) addDot(cell);
 
-    if (index === 0 && G.state === 'scanning') {
-      reticle.matrix.copy(hitMatrix);
-      reticle.visible = true;
+    const offCenter = THREE.MathUtils.radToDeg(tmpA.subVectors(position, V.pos).angleTo(V.aim));
+    if (offCenter < closestDeg) {
+      closestDeg = offCenter;
+      closest = hit;
+    }
+    if (index === 0) {
+      G.align.hitDeg = offCenter;
+      G.align.maxHitDeg = Math.max(G.align.maxHitDeg, offCenter);
     }
   });
-  if (G.state === 'scanning' && !G.rays[0]?.hit) reticle.visible = false;
+
+  // Checked against the crosshair, so a misbehaving ray can't place anything somewhere else.
+  G.centerHit = closestDeg <= MAX_CENTER_HIT_DEG ? closest : null;
+  const showReticle = G.state === 'scanning' && G.tapMode && !!G.centerHit && isWallHit(G.centerHit);
+  reticle.visible = showReticle;
+  if (showReticle) reticle.matrix.copy(G.centerHit.matrix);
+}
+
+function isWallHit(hit) {
+  return classify(hit.normal.y) === 'wall';
 }
 
 function placeViewerAttachments() {
-  crosshair.position.copy(V.pos).addScaledVector(V.fwd, 0.6);
+  crosshair.position.copy(V.pos).addScaledVector(V.aim, 0.6);
   crosshair.quaternion.copy(V.quat);
   if (fallback.mesh) {
     fallback.mesh.position.copy(V.pos).addScaledVector(V.fwd, 0.8).addScaledVector(V.up, -0.2);
@@ -513,10 +569,10 @@ function shoot() {
     if (!ghost.shootable) continue;
     ghost.getWorldPosition(tmpA);
     tmpA.sub(V.pos);
-    const t = tmpA.dot(V.fwd);
+    const t = tmpA.dot(V.aim);
     if (t <= 0 || t >= bestT) continue;
-    const miss = tmpB.copy(V.fwd).multiplyScalar(t).distanceTo(tmpA);
-    if (miss < 0.32 + t * 0.04) {    // Forgiving aim, wider with distance.
+    const miss = tmpB.copy(V.aim).multiplyScalar(t).distanceTo(tmpA);
+    if (miss < 0.14 + t * 0.03) {    // Forgiving aim, wider with distance.
       best = ghost;
       bestT = t;
     }
@@ -577,14 +633,18 @@ function onTap(source) {
 
 function queueTapPlacement() {
   G.pending.push((frame, refSpace) => {
-    const hit = G.rays[0]?.hit;
+    const hit = G.centerHit;
     if (!hit) {
       say('No surface under the crosshair', 2);
       return;
     }
+    if (!isWallHit(hit)) {
+      say('Rifts only open on walls. Aim at a wall.', 2);
+      return;
+    }
     const normal = hit.normal.clone();
     if (tmpA.subVectors(V.pos, hit.position).dot(normal) < 0) normal.negate();
-    addRift(frame, refSpace, hit.position, normal, 'tapped', hit.result);
+    addRift(frame, refSpace, hit.position, normal, 'wall', hit.result);
     say(`Rift ${G.rifts.length} placed`);
   });
 }
@@ -602,8 +662,8 @@ function primaryAction() {
 
 function placeAirRift() {
   G.pending.push((frame, refSpace) => {
-    const position = V.pos.clone().addScaledVector(V.fwd, 2.5);
-    addRift(frame, refSpace, position, V.fwd.clone().negate(), 'air', null);
+    const position = V.pos.clone().addScaledVector(V.aim, 2.5);
+    addRift(frame, refSpace, position, V.aim.clone().negate(), 'air', null);
     say('Air rift placed');
     if (G.state === 'scanning') startPlaying();
   });
@@ -640,10 +700,15 @@ function updateBanner() {
   } else if (performance.now() < G.messageUntil) {
     text = G.message;
   } else if (G.state === 'scanning') {
-    const { wall, up, down } = G.surfaces.counts();
-    text = G.tapMode
-      ? `Aim the crosshair at a surface and tap. Rifts: ${G.rifts.length}`
-      : `Sweep over walls and floor. Walls ${wall}, floor/table ${up}, ceiling ${down}`;
+    const { wall, up } = G.surfaces.counts();
+    const stuck = G.candidateCount === 0 && !G.rifts.length && performance.now() - G.scanStart > 20000;
+    if (G.tapMode) {
+      text = `Aim the crosshair at a wall and tap. Rifts: ${G.rifts.length}`;
+    } else if (stuck) {
+      text = 'No usable walls yet. Try one with more detail or light, or use Air rift in Diagnostics.';
+    } else {
+      text = `Sweep over walls and floor. Walls ${wall}, floor/table ${up}`;
+    }
   } else if (G.state === 'playing') {
     text = `Aim the crosshair and tap. Kills ${G.stats.kills}, reached you ${G.stats.reached}`;
   }
@@ -671,6 +736,8 @@ function buildDiagnostics() {
     `Launch tracking ${G.launchTracking} | Space resets ${G.refResets}`,
     `Features ${G.session?.enabledFeatures ? [...G.session.enabledFeatures].join(', ') : 'not reported'}`,
     `DOM overlay ${G.overlay} | Hit rays ${G.rays.length}`,
+    `Pose vs view ${G.align.poseDeg.toFixed(1)} deg (max ${G.align.maxPoseDeg.toFixed(1)}), ${G.align.poseCm.toFixed(1)} cm`,
+    `Lens offset ${G.align.aimDeg.toFixed(1)} deg | Center ray off crosshair ${G.align.hitDeg === null ? 'n/a' : G.align.hitDeg.toFixed(1)} deg (max ${G.align.maxHitDeg.toFixed(1)})`,
     `Surfaces wall ${counts.wall}, up ${counts.up}, down ${counts.down} | Rejected ${G.surfaces.rejected}, flipped ${G.surfaces.flipped}`,
     `Floor ${G.floorY === null ? 'unknown' : `${G.floorY.toFixed(2)} m`} | Candidates ${G.candidateCount}`,
     `Rifts ${G.rifts.length}, anchored ${anchored}`,

@@ -2,9 +2,10 @@
 import * as THREE from './three.js';
 import { createShadowTexture } from './rift.js';
 
-const EMERGE_START = -0.6;   // Starts inside the tunnel, behind the real surface.
-const EMERGE_END = 0.7;      // Clear of the surface, then it heads for the player.
-const REACH_DISTANCE = 0.45;
+const GHOST_SCALE = 0.4;     // About 31 cm tall and 26 cm wide.
+const EMERGE_START = -0.2;   // Starts inside the tunnel, behind the real surface.
+const EMERGE_END = 0.3;      // Clear of the surface, then it heads for the player.
+const REACH_DISTANCE = 0.35;
 
 const bodyProfile = [
   [0.001, 0.36], [0.12, 0.34], [0.2, 0.27], [0.24, 0.16],
@@ -41,6 +42,7 @@ export class Ghost {
 
     this.mesh = new THREE.Group();
     this.body = new THREE.Mesh(bodyGeometry, this.bodyMaterial);
+    this.body.scale.setScalar(GHOST_SCALE);
     this.mesh.add(this.body);
     for (const side of [-1, 1]) {
       const eye = new THREE.Mesh(eyeGeometry, this.eyeMaterial);
@@ -52,7 +54,7 @@ export class Ghost {
 
     shadowTexture ||= createShadowTexture();
     this.shadow = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.8, 0.8),
+      new THREE.PlaneGeometry(0.35, 0.35),
       new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, depthWrite: false }),
     );
     this.shadow.rotation.x = -Math.PI / 2;
@@ -104,7 +106,7 @@ export class Ghost {
     let result = null;
     if (!paused) {
       if (this.phase === 'emerge') {
-        this.mesh.position.y += this.speed * 1.3 * dt;
+        this.mesh.position.y += this.speed * 0.7 * dt;
         if (this.mesh.position.y >= EMERGE_END) this.phase = 'chase';
       } else {
         this.getWorldPosition(worldPos);
@@ -120,7 +122,7 @@ export class Ghost {
       }
     }
 
-    this.body.position.y = Math.sin(this.time * 2.2) * 0.035;
+    this.body.position.y = Math.sin(this.time * 2.2) * 0.015;
     this.body.rotation.z = Math.sin(this.time * 1.4) * 0.06;
     this.mesh.lookAt(viewerPos);
 
@@ -141,7 +143,7 @@ export class Ghost {
   }
 
   updateShadow(floorY) {
-    const emerged = this.phase === 'chase' || this.mesh.position.y > 0.15;
+    const emerged = this.phase === 'chase' || this.mesh.position.y > 0.1;
     this.getWorldPosition(worldPos);
     const height = floorY === null ? -1 : worldPos.y - floorY;
     if (!emerged || height <= 0) {
