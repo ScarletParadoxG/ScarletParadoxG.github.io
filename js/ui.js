@@ -95,14 +95,18 @@ export class Panel {
     const rows = Math.ceil(buttons.length / 2);
     const gridTop = HEIGHT - PAD + BUTTON_GAP - rows * (BUTTON_HEIGHT + BUTTON_GAP);
 
-    ctx.font = '500 32px system-ui, sans-serif';
-    ctx.fillStyle = '#c5c9d8';
     let y = 104;
     for (const line of this.lines) {
-      for (const part of wrap(ctx, line, WIDTH - PAD * 2)) {
-        if (y + 40 > gridTop) break;
+      // A line can be plain text, or { big: 'text' } for something that should stand out.
+      const big = typeof line === 'object';
+      ctx.font = big ? '700 112px system-ui, sans-serif' : '500 32px system-ui, sans-serif';
+      ctx.fillStyle = big ? '#ffffff' : '#c5c9d8';
+      const step = big ? 136 : 42;
+      if (big) y += 24;
+      for (const part of wrap(ctx, big ? line.big : line, WIDTH - PAD * 2)) {
+        if (y + step - 2 > gridTop) break;
         ctx.fillText(part, PAD, y);
-        y += 42;
+        y += step;
       }
     }
 
@@ -151,6 +155,56 @@ export class Panel {
 
   setHover(id) {
     this.hovered = id;
+  }
+
+  dispose(scene) {
+    scene.remove(this.mesh);
+    this.mesh.material.dispose();
+    this.mesh.geometry.dispose();
+    this.texture.dispose();
+  }
+}
+
+// The score, kept at the top of the player's view.
+export class ScoreHud {
+  constructor(scene) {
+    this.canvas = document.createElement('canvas');
+    this.canvas.width = 640;
+    this.canvas.height = 96;
+    this.ctx = this.canvas.getContext('2d');
+    this.texture = new THREE.CanvasTexture(this.canvas);
+    this.texture.colorSpace = THREE.SRGBColorSpace;
+    this.mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.6, 0.09),
+      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, depthTest: false }),
+    );
+    this.mesh.renderOrder = 205;
+    this.mesh.visible = false;
+    scene.add(this.mesh);
+    this.text = '';
+  }
+
+  update(visible, score, best, headPos, headQuat, headUp, headForward) {
+    this.mesh.visible = visible;
+    if (!visible) return;
+    const text = `Score ${score}    Best ${best}`;
+    if (text !== this.text) {
+      this.text = text;
+      const { ctx } = this;
+      ctx.clearRect(0, 0, 640, 96);
+      ctx.fillStyle = 'rgba(14,15,24,0.75)';
+      ctx.beginPath();
+      ctx.roundRect(0, 0, 640, 96, 24);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '700 44px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, 320, 50, 600);
+      this.texture.needsUpdate = true;
+    }
+    this.mesh.position.copy(headPos).addScaledVector(headForward, 1.5).addScaledVector(headUp, 0.52);
+    this.mesh.quaternion.copy(headQuat);
   }
 
   dispose(scene) {

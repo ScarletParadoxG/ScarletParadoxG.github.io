@@ -1,11 +1,11 @@
 import * as THREE from './three.js';
-import { RoomModel, findWallSpots, selectRifts, distanceToEdge } from './room.js';
-import { createRift, anchorRift, updateRift, destroyRift, HOLE_RADIUS } from './rift.js';
+import { RoomModel, findRiftSpots, pickRiftSpot, isRiftSite, distanceToEdge } from './room.js';
+import { createRift, anchorRift, updateRift, closeRift, destroyRift, HOLE_RADIUS } from './rift.js';
 import { Ghost } from './ghost.js';
 import { SpatialAudio } from './audio.js';
 import { DepthOcclusion } from './depth.js';
 import { Pointers } from './input.js';
-import { Panel, Toast } from './ui.js';
+import { Panel, Toast, ScoreHud } from './ui.js';
 import { probeFeatures } from './probe.js';
 
 if (new URLSearchParams(location.search).has('sim')) await import('../test/mock-xr.js');
@@ -15,9 +15,11 @@ const $ = (id) => document.getElementById(id);
 
 const NO_ROOM_GRACE_SECONDS = 3;   // Meta says planes can take 2 to 3 seconds to appear.
 const BRIGHTNESS_STEPS = [1, 0.75, 0.5];
+const BEST_SCORE_KEY = 'ghostHunter.bestScore';
+const emptyKills = () => ({ normal: 0, small: 0, big: 0 });
 
 const G = {
-  state: 'menu',            // menu -> setup -> playing
+  state: 'menu',            // menu -> setup -> playing -> gameover -> playing ...
   session: null,
   refType: 'local',
   rifts: [],
@@ -31,7 +33,15 @@ const G = {
   pending: [],
   sessionTime: 0,
   roomCaptureUsed: false,
-  spawnTimer: 2,
+  riftCounter: 0,
+  playTime: 0,
+  spawnTimer: 0,
+  riftTimer: 0,
+  score: 0,
+  best: loadBest(),
+  newBest: false,
+  kills: emptyKills(),
+  spawnedByType: emptyKills(),
   uiTimer: 0,
   fps: 0,
   minFps: Infinity,
@@ -41,12 +51,12 @@ const G = {
   refResets: 0,
   brightnessStep: 0,
   debug: false,
-  showArrow: true,
+  voicesMuted: false,
   beepLabel: '',
   message: '',
   messageUntil: 0,
   flash: 0,
-  stats: { kills: 0, misses: 0, reached: 0, selects: 0, spawned: 0 },
+  stats: { misses: 0, hits: 0, selects: 0, riftsOpened: 0, riftsClosed: 0 },
   log: [],
   reports: [],
 };
@@ -64,6 +74,7 @@ const depth = new DepthOcclusion();
 const pointers = new Pointers(scene);
 let panel = null;
 let toast = null;
+let scoreHud = null;
 let renderer = null;
 
 // The head pose, in the reference space.
@@ -93,6 +104,32 @@ function say(message, seconds = 2) {
   G.messageUntil = performance.now() + seconds * 1000;
 }
 
+// Storage can be unavailable in private windows, and the game works fine without it.
+function loadBest() {
+  try {
+    return Number(localStorage.getItem(BEST_SCORE_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveBest() {
+  if (G.score <= G.best) return;
+  G.best = G.score;
+  G.newBest = true;
+  try {
+    localStorage.setItem(BEST_SCORE_KEY, String(G.best));
+  } catch { /* Kept for this visit only. */ }
+}
+
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function ramp([start, end]) {
+  return start + (end - start) * Math.min(1, G.playTime / CFG.rampSeconds);
+}
+
 // ---------- Things drawn in the world ----------
 
 const reticle = new THREE.Mesh(
@@ -110,15 +147,6 @@ const gazeCursor = new THREE.Mesh(
 gazeCursor.renderOrder = 150;
 gazeCursor.visible = false;
 scene.add(gazeCursor);
-
-// Points toward the nearest ghost that's out of view.
-const arrow = new THREE.Mesh(
-  new THREE.ConeGeometry(0.018, 0.06, 12),
-  new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, depthTest: false }),
-);
-arrow.renderOrder = 150;
-arrow.visible = false;
-scene.add(arrow);
 
 const damageFlash = new THREE.Mesh(
   new THREE.SphereGeometry(0.2, 16, 12),
@@ -189,6 +217,7 @@ async function startSession(session) {
 
   panel = new Panel(scene);
   toast = new Toast(scene);
+  scoreHud = new ScoreHud(scene);
   G.minFps = Infinity;
   setState('setup');
   document.documentElement.classList.add('in-session');
@@ -197,27 +226,28 @@ async function startSession(session) {
 
 function onSessionEnd() {
   log('Session ended');
+  saveBest();
   G.reports.push(buildDiagnostics());
   renderer.setAnimationLoop(null);
-  audio.stopAll();
-  G.ghosts.forEach((ghost) => ghost.remove());
-  G.ghosts = [];
-  G.rifts.forEach((rift) => destroyRift(rift, scene));
-  G.rifts = [];
+  clearRound();
   G.spots = [];
   room.dispose();
   depth.reset();
   pointers.dispose();
   panel?.dispose(scene);
   toast?.dispose(scene);
+  scoreHud?.dispose(scene);
   panel = null;
   toast = null;
+  scoreHud = null;
   setPlacing(false);
   G.pending = [];
   G.session = null;
   G.tracking = 'unknown';
+  G.score = 0;
   H.known = false;
-  [reticle, gazeCursor, arrow, damageFlash].forEach((object) => { object.visible = false; });
+  syncVoiceMute(false);
+  [reticle, gazeCursor, damageFlash].forEach((object) => { object.visible = false; });
   document.documentElement.classList.remove('in-session');
   G.state = 'menu';
   showReport();
@@ -266,9 +296,15 @@ function onFrame(time, frame) {
   G.pending = [];
   actions.forEach((action) => action(frame, refSpace));
 
+  // Tracking loss, the system menu and the in-game menu all stop the game.
+  const paused = G.state === 'playing' && !!panel?.visible;
+  const active = tracked && G.session?.visibilityState === 'visible' && !paused;
+  syncVoiceMute(paused);
+
   depth.update(renderer, G.rifts);
-  G.rifts.forEach((rift) => updateRift(rift, frame, refSpace, dt));
-  updateGhosts(dt, tracked && G.session?.visibilityState === 'visible');
+  updateRifts(frame, refSpace, dt);
+  if (G.state === 'playing' && active) updateDirector(frame, refSpace, dt);
+  updateGhosts(dt, active);
   updateAim();
   updateEffects(dt);
 
@@ -278,7 +314,14 @@ function onFrame(time, frame) {
     refreshInterface();
   }
   updateToast();
+  scoreHud?.update(G.state === 'playing', G.score, Math.max(G.score, G.best), H.pos, H.quat, H.up, H.fwd);
   renderer.render(scene, camera);
+}
+
+function syncVoiceMute(muted) {
+  if (muted === G.voicesMuted) return;
+  G.voicesMuted = muted;
+  audio.setVoicesMuted(muted);
 }
 
 function updateTracking(tracked) {
@@ -335,7 +378,7 @@ function handleSelect(source) {
 
   if (G.placing) {
     placeFromAim();
-  } else if (G.state === 'playing') {
+  } else if (G.state === 'playing' && !panel?.visible) {
     if (pointer) pointers.fire(pointer);
     shoot(origin, direction, pointer);
   }
@@ -351,61 +394,118 @@ function shoot(origin, direction, pointer) {
     const t = tmpA.dot(direction);
     if (t <= 0 || t >= bestT) continue;
     const miss = tmpB.copy(direction).multiplyScalar(t).distanceTo(tmpA);
-    if (miss < 0.14 + t * 0.03) {    // Forgiving aim, wider with distance.
+    if (miss < ghost.type.hitRadius + t * 0.03) {    // Forgiving aim, wider with distance.
       best = ghost;
       bestT = t;
     }
   }
-  if (best) {
-    best.kill();
-    G.stats.kills++;
-    audio.blip(880, 0.25);
-    pointers.pulse(pointer, 0.9, 90);
-    say('Ghost destroyed', 1);
-    log(`Kill at ${bestT.toFixed(2)} m`);
-  } else {
+  if (!best) {
     G.stats.misses++;
     audio.blip(180, 0.08, 'square', 0.06);
     pointers.pulse(pointer, 0.2, 20);
+    return;
+  }
+
+  G.stats.hits++;
+  if (best.hit(direction)) {
+    G.score += best.type.points;
+    G.kills[best.typeName]++;
+    audio.blip(880, 0.25);
+    pointers.pulse(pointer, 0.9, 90);
+    log(`Killed ${best.typeName} at ${bestT.toFixed(2)} m`);
+  } else {
+    audio.blip(520, 0.1, 'square', 0.12);
+    pointers.pulse(pointer, 0.5, 40);
   }
 }
 
 // ---------- Rifts ----------
 
-function addRift(frame, refSpace, position, normal, surface) {
+function addRift(frame, refSpace, position, normal, surface, site) {
   const rift = createRift(position, normal, surface);
-  rift.id = G.rifts.length + 1;
+  rift.id = ++G.riftCounter;
+  rift.quota = Math.round(randomBetween(CFG.ghostsPerRiftMin, CFG.ghostsPerRiftMax));
+  rift.kind = site?.entry.kind || surface;
+  if (site) rift.site = { entry: site.entry, hole: room.addHole(site.entry, site.x, site.z, HOLE_RADIUS) };
   scene.add(rift.group);
   anchorRift(rift, frame, refSpace);
   G.rifts.push(rift);
-  log(`Rift R${rift.id}: ${surface} at ${fmt(position)}`);
+  G.stats.riftsOpened++;
+  log(`Rift R${rift.id}: ${rift.kind} at ${fmt(position)}, ${rift.quota} ghosts`);
   return rift;
 }
 
-function openRifts(frame, refSpace) {
-  if (!G.rifts.length) {
-    const spots = findWallSpots(room.list, H.pos);
-    const picks = selectRifts(spots, H.pos, CFG.riftCount);
-    log(`Auto placement: ${picks.length} picked from ${spots.length} spots`);
-    picks.forEach((spot) => {
-      addRift(frame, refSpace, spot.pos, spot.normal, 'room-wall');
-      room.addHole(spot.wall, spot.local.x, spot.local.z, HOLE_RADIUS);
-    });
-  }
-  if (!G.rifts.length) {
-    say('No usable wall spots. Try Place by pointing.', 3);
-    return;
-  }
-  startPlaying();
+function isOpen(rift) {
+  return rift.phase === 'opening' || rift.phase === 'open';
 }
 
-function startPlaying() {
-  setPlacing(false);
-  G.spawnTimer = 1.5;
-  panel?.hide();
-  setState('playing');
-  say('Pull the trigger to shoot. Grip opens the menu.', 4);
-  log('Ghosts active');
+// Opens a rift somewhere random. With no room data, it floats in the air instead.
+function openRandomRift(frame, refSpace, { desperate = false } = {}) {
+  const taken = G.rifts.filter((rift) => rift.phase !== 'closed').map((rift) => rift.group.position);
+  const spots = findRiftSpots(room.list, H.pos);
+  let spot = pickRiftSpot(spots, H.pos, taken);
+  if (!spot && desperate) spot = pickRiftSpot(spots, H.pos, taken, { minSpacing: 0.6 });
+
+  if (spot) {
+    return addRift(frame, refSpace, spot.pos, spot.normal, 'room', { entry: spot.surface, x: spot.local.x, z: spot.local.z });
+  }
+  if (spots.length) return null;   // The room is full for now, so try again later.
+
+  const azimuth = Math.random() * Math.PI * 2;
+  const elevation = THREE.MathUtils.degToRad(randomBetween(-20, 25));
+  const direction = new THREE.Vector3(
+    Math.sin(azimuth) * Math.cos(elevation),
+    Math.sin(elevation),
+    Math.cos(azimuth) * Math.cos(elevation),
+  );
+  const position = H.pos.clone().addScaledVector(direction, randomBetween(2, 3));
+  return addRift(frame, refSpace, position, direction.negate(), 'air', null);
+}
+
+function updateRifts(frame, refSpace, dt) {
+  for (const rift of G.rifts) {
+    updateRift(rift, frame, refSpace, dt);
+    if (rift.phase === 'closed' && rift.site) {
+      room.removeHole(rift.site.entry, rift.site.hole);
+      rift.site = null;
+    }
+  }
+  // A closed rift's anchor stays until its last ghost has gone, since ghosts are positioned by it.
+  G.rifts = G.rifts.filter((rift) => {
+    if (rift.phase !== 'closed' || G.ghosts.some((ghost) => ghost.rift === rift)) return true;
+    destroyRift(rift, scene);
+    return false;
+  });
+}
+
+// Decides what happens next: which rifts close, when new ones open, and which ghosts come out.
+function updateDirector(frame, refSpace, dt) {
+  G.playTime += dt;
+
+  for (const rift of G.rifts) {
+    if (!isOpen(rift) || rift.spawned < rift.quota) continue;
+    const stillEmerging = G.ghosts.some((ghost) => ghost.rift === rift && ghost.alive && ghost.phase === 'emerge');
+    if (!stillEmerging) {
+      closeRift(rift);
+      G.stats.riftsClosed++;
+      log(`Rift R${rift.id} closing`);
+    }
+  }
+
+  const openRifts = G.rifts.filter(isOpen);
+  G.riftTimer -= dt;
+  if (openRifts.length === 0 || (G.riftTimer <= 0 && openRifts.length < Math.round(ramp(CFG.maxRifts)))) {
+    openRandomRift(frame, refSpace, { desperate: openRifts.length === 0 });
+    G.riftTimer = randomBetween(CFG.riftOpenIntervalMin, CFG.riftOpenIntervalMax);
+  }
+
+  G.spawnTimer -= dt;
+  if (G.spawnTimer > 0) return;
+  const alive = G.ghosts.filter((ghost) => ghost.alive).length;
+  const ready = G.rifts.filter((rift) => rift.phase === 'open' && rift.spawned < rift.quota);
+  if (alive >= Math.round(ramp(CFG.maxGhosts)) || !ready.length) return;
+  spawnGhost(pickGhostType(), ready[Math.floor(Math.random() * ready.length)]);
+  G.spawnTimer = ramp(CFG.spawnInterval);
 }
 
 function setPlacing(on) {
@@ -423,7 +523,7 @@ function canUseHitTest() {
   return typeof G.session?.requestHitTestSource === 'function';
 }
 
-// Finds what the active pointer is aimed at: a room wall, or a hit-test surface if there's no room data.
+// Finds what the active pointer is aimed at: a room surface, or a hit-test surface if there's no room data.
 function updatePlacement(frame, refSpace) {
   if (!G.placing) return;
   const pointer = pointers.active;
@@ -438,11 +538,9 @@ function updatePlacement(frame, refSpace) {
     target = {
       position: origin.clone().addScaledVector(direction, distance),
       normal,
-      entry,
-      x,
-      z,
-      surface: 'room-wall',
-      valid: entry.kind === 'wall' && distanceToEdge(x, z, entry.polygon) > HOLE_RADIUS + 0.06,
+      site: { entry, x, z },
+      surface: 'room',
+      valid: isRiftSite(entry.kind) && normal.y > -0.35 && distanceToEdge(x, z, entry.polygon) > HOLE_RADIUS + 0.04,
     };
   } else if (canUseHitTest() && pointer) {
     if (G.hitSourceFor !== pointer.source && !G.hitSourcePending) requestHitSource(pointer.source);
@@ -455,8 +553,9 @@ function updatePlacement(frame, refSpace) {
       target = {
         position: new THREE.Vector3().setFromMatrixPosition(hitMatrix),
         normal,
+        site: null,
         surface: 'patch',
-        valid: Math.abs(normal.y) < 0.35,
+        valid: normal.y > -0.35,
       };
     }
   }
@@ -488,35 +587,91 @@ function placeFromAim() {
   G.pending.push((frame, refSpace) => {
     const target = G.placeTarget;
     if (!target) {
-      say('Aim at a wall first.');
+      say('Aim at a surface first.');
       return;
     }
     if (!target.valid) {
-      say(target.entry && target.entry.kind === 'wall' ? 'Too close to the edge of the wall.' : 'Rifts only open on walls.');
+      say('A rift can\'t open there.');
       return;
     }
-    addRift(frame, refSpace, target.position, target.normal, target.surface);
-    if (target.entry) room.addHole(target.entry, target.x, target.z, HOLE_RADIUS);
-    say(`Rift ${G.rifts.length} placed`);
+    addRift(frame, refSpace, target.position, target.normal, target.surface, target.site);
+    say(`Rift placed. ${G.rifts.length} ready.`);
     G.uiTimer = 0;
   });
 }
 
-function placeAirRift(frame, refSpace) {
-  const position = H.pos.clone().addScaledVector(H.fwd, 2.5);
-  addRift(frame, refSpace, position, H.fwd.clone().negate(), 'air');
-  say('Air rift placed');
-  if (G.state === 'setup') startPlaying();
+// ---------- A round ----------
+
+// Removes everything from the current round.
+function clearRound() {
+  audio.stopAll();
+  G.ghosts.forEach((ghost) => ghost.remove());
+  G.ghosts = [];
+  G.rifts.forEach((rift) => {
+    if (rift.site) room.removeHole(rift.site.entry, rift.site.hole);
+    destroyRift(rift, scene);
+  });
+  G.rifts = [];
+}
+
+function startRound(frame, refSpace) {
+  setPlacing(false);
+  G.score = 0;
+  G.newBest = false;
+  G.kills = emptyKills();
+  G.spawnedByType = emptyKills();
+  G.stats.misses = 0;
+  G.stats.hits = 0;
+  G.playTime = 0;
+  G.spawnTimer = 1.5;
+  G.riftTimer = randomBetween(CFG.riftOpenIntervalMin, CFG.riftOpenIntervalMax);
+
+  // Rifts placed by hand during setup count toward the starting number.
+  for (let i = G.rifts.length; i < CFG.startingRifts; i++) {
+    if (!openRandomRift(frame, refSpace, { desperate: true })) break;
+  }
+  panel?.hide();
+  setState('playing');
+  say('Pull the trigger to shoot. Grip opens the menu.', 4);
+  log(`Round started with ${G.rifts.length} rifts`);
+}
+
+function gameOver() {
+  saveBest();
+  log(`Game over: score ${G.score}, ${G.playTime.toFixed(0)} s`);
+  clearRound();
+  audio.blip(90, 0.5, 'sawtooth', 0.3);
+  pointers.list.forEach((pointer) => pointers.pulse(pointer, 1, 200));
+  G.flash = 0.45;
+  G.messageUntil = 0;
+  setState('gameover');
+  panel?.showInFront(H.pos, H.fwd);
 }
 
 // ---------- Ghosts ----------
 
-function spawnGhost() {
-  if (!G.rifts.length) return;
-  const rift = G.rifts[Math.floor(Math.random() * G.rifts.length)];
-  G.ghosts.push(new Ghost(rift, scene, audio.createVoice(), CFG.ghostSpeed));
-  G.stats.spawned++;
-  log(`Ghost from R${rift.id}`);
+function pickGhostType() {
+  const share = (from, maxShare) => {
+    if (G.playTime < from) return 0;
+    return 0.1 + (maxShare - 0.1) * Math.min(1, (G.playTime - from) / CFG.mixRampSeconds);
+  };
+  const big = share(CFG.bigGhostsFrom, CFG.bigGhostsMaxShare);
+  const small = share(CFG.smallGhostsFrom, CFG.smallGhostsMaxShare);
+  const roll = Math.random();
+  if (roll < big) return 'big';
+  if (roll < big + small) return 'small';
+  return 'normal';
+}
+
+function spawnGhost(typeName = 'normal', rift = G.rifts.find(isOpen)) {
+  if (!rift) return null;
+  const type = CFG.ghostTypes[typeName];
+  const ghost = new Ghost(rift, scene, audio.createVoice(type.voice), typeName, type);
+  G.ghosts.push(ghost);
+  rift.spawned++;
+  G.spawnedByType[typeName]++;
+  log(`${typeName} ghost from R${rift.id} (${rift.spawned}/${rift.quota})`);
+  return ghost;
 }
 
 const shadowSurface = (x, y, z) => {
@@ -526,61 +681,20 @@ const shadowSurface = (x, y, z) => {
 };
 
 function updateGhosts(dt, active) {
-  if (G.state === 'playing' && active) {
-    G.spawnTimer -= dt;
-    const alive = G.ghosts.filter((ghost) => ghost.alive).length;
-    if (G.spawnTimer <= 0 && alive < CFG.maxGhosts) {
-      G.spawnTimer = CFG.spawnInterval;
-      spawnGhost();
-    }
-  }
-
-  let nearest = null;
-  let nearestDist = Infinity;
+  let reached = false;
   for (const ghost of G.ghosts) {
     const result = ghost.update(dt, H.pos, {
       paused: !active,                 // World-locked positions can't be trusted without tracking.
       shadowSurface,
       brightness: BRIGHTNESS_STEPS[G.brightnessStep],
     });
-
-    if (result === 'reached') {
-      G.stats.reached++;
-      ghost.remove();
-      audio.blip(90, 0.5, 'sawtooth', 0.3);
-      pointers.list.forEach((pointer) => pointers.pulse(pointer, 1, 200));
-      G.flash = 0.45;
-      say('A ghost reached you');
-      log('Ghost reached the player');
-      continue;
-    }
+    if (result === 'reached') reached = true;
     if (ghost.done) continue;
-
     ghost.getWorldPosition(tmpA);
     ghost.voice?.update(tmpA);
-    if (ghost.alive) {
-      const distance = tmpA.distanceTo(H.pos);
-      if (distance < nearestDist) {
-        nearestDist = distance;
-        nearest = ghost;
-      }
-    }
   }
   G.ghosts = G.ghosts.filter((ghost) => !ghost.done);
-  updateArrow(nearest);
-}
-
-function updateArrow(ghost) {
-  if (!ghost || !G.showArrow || !H.known) {
-    arrow.visible = false;
-    return;
-  }
-  ghost.getWorldPosition(tmpA);
-  tmpA.sub(H.pos).normalize();
-  arrow.visible = tmpA.dot(H.fwd) < Math.cos(THREE.MathUtils.degToRad(35));
-  if (!arrow.visible) return;
-  arrow.position.copy(H.pos).addScaledVector(H.fwd, 0.7).addScaledVector(H.up, -0.14);
-  arrow.quaternion.setFromUnitVectors(Y_AXIS, tmpA);
+  if (reached && G.state === 'playing') gameOver();
 }
 
 function updateEffects(dt) {
@@ -612,7 +726,7 @@ function runAudioTest() {
 // ---------- Interface inside the headset ----------
 
 function togglePanel() {
-  if (!panel) return;
+  if (!panel || G.state === 'gameover') return;   // The game over screen stays until a choice is made.
   if (panel.visible) panel.hide();
   else panel.showInFront(H.pos, H.fwd);
   G.uiTimer = 0;
@@ -621,24 +735,21 @@ function togglePanel() {
 function runButton(id) {
   G.uiTimer = 0;
   switch (id) {
-    case 'open': G.pending.push(openRifts); break;
+    case 'start': G.pending.push(startRound); break;
     case 'place': setPlacing(!G.placing); if (G.placing) panel.hide(); break;
     case 'capture':
       G.roomCaptureUsed = true;
       log('Room setup requested');
       G.session.initiateRoomCapture().catch?.((error) => log(`Room setup failed: ${error.name}`));
       break;
-    case 'air': G.pending.push(placeAirRift); break;
-    case 'spawn': spawnGhost(); break;
     case 'audio': runAudioTest(); break;
-    case 'arrows': G.showArrow = !G.showArrow; break;
     case 'debug':
       G.debug = !G.debug;
       room.setOutlines(G.state === 'setup' || G.debug);
       break;
     case 'depth': depth.enabled = !depth.enabled; break;
     case 'bright': G.brightnessStep = (G.brightnessStep + 1) % BRIGHTNESS_STEPS.length; break;
-    case 'hide': panel.hide(); break;
+    case 'resume': panel.hide(); break;
     case 'exit': G.session.end(); break;
     default: break;
   }
@@ -649,10 +760,15 @@ function occlusionSummary() {
   return 'room surfaces';
 }
 
+function formatTime(seconds) {
+  const whole = Math.floor(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
 function refreshInterface() {
   if (!panel) return;
   if (G.state === 'setup') {
-    G.spots = H.known ? findWallSpots(room.list, H.pos) : [];
+    G.spots = H.known ? findRiftSpots(room.list, H.pos) : [];
     // Show the panel once the headset has a pose to place it by.
     if (!panel.visible && !G.placing && H.known && !panel.shownOnce) {
       panel.showInFront(H.pos, H.fwd);
@@ -663,38 +779,47 @@ function refreshInterface() {
 
   const counts = room.summary();
   const walls = counts.wall || 0;
-  const roomMissing = G.sessionTime > NO_ROOM_GRACE_SECONDS && walls === 0;
+  const roomMissing = G.sessionTime > NO_ROOM_GRACE_SECONDS && G.spots.length === 0;
   const lines = [];
   const buttons = [];
+  let title = 'Ghost Hunter';
+
+  if (G.state === 'gameover') {
+    title = 'Game over';
+    lines.push({ big: String(G.score) });
+    lines.push(G.newBest ? `Final score. A new high score!` : `Final score. High score: ${G.best}.`);
+    lines.push(`Survived ${formatTime(G.playTime)}. Killed ${G.kills.normal} normal, ${G.kills.small} small, ${G.kills.big} big.`);
+    buttons.push({ id: 'start', label: 'Restart', primary: true });
+    buttons.push({ id: 'exit', label: 'Exit and show report' });
+    panel.setContent(title, lines, buttons);
+    return;
+  }
 
   if (G.state === 'setup') {
-    lines.push(`${device}. Walls found: ${walls}. Usable rift spots: ${G.spots.length}.`);
-    lines.push(`Occlusion: ${occlusionSummary()}.`);
-    if (!room.supported) lines.push('This browser did not grant room planes.');
-    else if (roomMissing) lines.push('No walls yet. Run room setup, or use Place by pointing.');
-    else lines.push('Room outlines should line up with your real walls.');
-    buttons.push({ id: 'open', label: G.rifts.length ? 'Start ghosts' : 'Open rifts', primary: true, enabled: G.rifts.length > 0 || G.spots.length > 0 });
+    lines.push(`${device}. Walls: ${walls}. Furniture: ${counts.furniture || 0}. Rift spots: ${G.spots.length}.`);
+    lines.push(`Occlusion: ${occlusionSummary()}. High score: ${G.best}.`);
+    if (!room.supported) lines.push('This browser did not grant room planes, so rifts will float in the air.');
+    else if (roomMissing) lines.push('No room found, so rifts will float in the air. Run room setup to use your real surfaces.');
+    else lines.push('Room outlines should line up with your real surfaces.');
+    buttons.push({ id: 'start', label: 'Start game', primary: true });
     buttons.push({ id: 'place', label: `Place by pointing: ${G.placing ? 'on' : 'off'}` });
     if (typeof G.session.initiateRoomCapture === 'function' && roomMissing) {
       buttons.push({ id: 'capture', label: 'Run room setup', enabled: !G.roomCaptureUsed });
     }
-    buttons.push({ id: 'air', label: 'Air rift (no wall)' });
   } else {
-    lines.push(`Kills ${G.stats.kills}. Reached you ${G.stats.reached}. Rifts ${G.rifts.length}, anchored ${G.rifts.filter((r) => r.anchor).length}.`);
+    title = 'Paused';
+    lines.push(`Score ${G.score}. Time ${formatTime(G.playTime)}.`);
     lines.push(`Occlusion: ${occlusionSummary()}. FPS ${G.fps.toFixed(0)}.`);
-    buttons.push({ id: 'spawn', label: 'Spawn ghost' });
-    buttons.push({ id: 'air', label: 'Air rift (no wall)' });
+    buttons.push({ id: 'resume', label: 'Resume', primary: true });
   }
 
   buttons.push({ id: 'audio', label: 'Audio test' });
-  buttons.push({ id: 'arrows', label: `Arrows: ${G.showArrow ? 'on' : 'off'}` });
   buttons.push({ id: 'debug', label: `Room outlines: ${G.debug ? 'on' : 'off'}` });
   buttons.push({ id: 'bright', label: `Ghost brightness: ${Math.round(BRIGHTNESS_STEPS[G.brightnessStep] * 100)}%` });
   if (depth.active) buttons.push({ id: 'depth', label: `Depth occlusion: ${depth.enabled ? 'on' : 'off'}` });
-  buttons.push({ id: 'hide', label: 'Hide menu' });
   buttons.push({ id: 'exit', label: 'Exit and show report' });
 
-  panel.setContent('Ghost Hunter', lines, buttons);
+  panel.setContent(title, lines, buttons);
 }
 
 function updateToast() {
@@ -709,7 +834,7 @@ function updateToast() {
   } else if (performance.now() < G.messageUntil) {
     text = G.message;
   } else if (G.placing) {
-    text = 'Aim at a wall and pull the trigger. Grip opens the menu.';
+    text = 'Aim at a surface and pull the trigger. Grip opens the menu.';
   }
   toast.update(text, warn, H.pos, H.quat, H.up, H.fwd);
 }
@@ -723,7 +848,6 @@ function fmt(v) {
 function buildDiagnostics() {
   const counts = room.summary();
   const { floorY, ceilingY } = room.levels;
-  const anchored = G.rifts.filter((rift) => rift.anchor).length;
   const lines = [
     `--- Session report ${new Date().toISOString()} ---`,
     `Device ${device} | ${navigator.userAgent}`,
@@ -731,14 +855,14 @@ function buildDiagnostics() {
     `Tracking ${G.tracking} (lost ${G.trackingLosses}x) | Space ${G.refType}, resets ${G.refResets}`,
     `Granted ${G.session?.enabledFeatures ? [...G.session.enabledFeatures].join(', ') : 'not reported'}`,
     `Planes ${room.supported ? JSON.stringify(counts) : 'not granted'} | Labels ${room.labels().join(', ') || 'none'}`,
-    `Floor ${floorY === null ? 'unknown' : `${floorY.toFixed(2)} m`} | Ceiling ${ceilingY === null ? 'unknown' : `${ceilingY.toFixed(2)} m`} | Spots ${G.spots.length}`,
+    `Floor ${floorY === null ? 'unknown' : `${floorY.toFixed(2)} m`} | Ceiling ${ceilingY === null ? 'unknown' : `${ceilingY.toFixed(2)} m`}`,
     `Depth occlusion ${depth.active ? `active, ${depth.enabled ? 'on' : 'off'}, near ${depth.near} far ${depth.far}` : 'not available'}`,
     `Pointers ${pointers.list.map((p) => `${p.key}${p.source?.hand ? ' hand' : ''}`).join(', ') || 'none'}`,
-    `Rifts ${G.rifts.length}, anchored ${anchored}`,
-    ...G.rifts.map((rift) => `  R${rift.id} ${rift.surface}: ${rift.anchorState}, `
+    `Score ${G.score}, high score ${G.best} | Round time ${G.playTime.toFixed(0)} s`,
+    `Killed ${JSON.stringify(G.kills)} of ${JSON.stringify(G.spawnedByType)} | Hits ${G.stats.hits}, misses ${G.stats.misses}, trigger presses ${G.stats.selects}`,
+    `Rifts opened ${G.stats.riftsOpened}, closed ${G.stats.riftsClosed}, current ${G.rifts.length}`,
+    ...G.rifts.map((rift) => `  R${rift.id} ${rift.kind} ${rift.phase}, ${rift.spawned}/${rift.quota} ghosts: ${rift.anchorState}, `
       + `${rift.tracked ? 'tracked' : 'untracked'}, jump ${(rift.maxJump * 100).toFixed(1)} cm, drift ${(rift.drift * 100).toFixed(1)} cm`),
-    `Ghosts alive ${G.ghosts.filter((ghost) => ghost.alive).length}, spawned ${G.stats.spawned}`,
-    `Kills ${G.stats.kills}, misses ${G.stats.misses}, reached ${G.stats.reached}, trigger presses ${G.stats.selects}`,
     `Audio ${audio.state}, voices ${audio.voices.size}`,
   ];
   if (window.__ghErrors.length) lines.push(`Errors: ${window.__ghErrors.join(' | ')}`);
@@ -783,7 +907,7 @@ function bindPage() {
   $('btn-probe').addEventListener('click', async () => {
     const button = $('btn-probe');
     button.disabled = true;
-    button.textContent = `Probing...`;
+    button.textContent = 'Probing...';
     try {
       G.reports.push(await probeFeatures($('page')));
     } catch (error) {
@@ -817,7 +941,12 @@ async function checkSupport() {
 }
 
 // Lets the simulator draw its fake room and tests inspect state. Not used on a headset.
-window.__gh = { G, H, scene, audio, room, depth, pointers, THREE, findWallSpots, selectRifts, spawnGhost, get panel() { return panel; }, get toast() { return toast; } };
+window.__gh = {
+  G, H, scene, audio, room, depth, pointers, THREE, findRiftSpots, pickRiftSpot, spawnGhost, pickGhostType,
+  get panel() { return panel; },
+  get toast() { return toast; },
+  get scoreHud() { return scoreHud; },
+};
 
 bindPage();
 await checkSupport();

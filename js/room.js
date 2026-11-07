@@ -79,10 +79,17 @@ function segmentBlockedBy(entry, from, to) {
   return pointInPolygon(localA.x + (localB.x - localA.x) * t, localA.z + (localB.z - localA.z) * t, entry.polygon);
 }
 
-// Every usable rift location on the room's walls: inside a wall, clear of its edges, doors and
-// windows, at a sensible height, and not hidden from the player by another surface.
-export function findWallSpots(entries, headPos, {
-  step = 0.25, edgeClearance = 0.3, minDist = 1, maxDist = 7,
+const RIFT_SITES = new Set(['wall', 'floor', 'furniture', 'horizontal']);
+
+// Everything except ceilings, doors and windows. Height rules are in findRiftSpots.
+export function isRiftSite(kind) {
+  return RIFT_SITES.has(kind);
+}
+
+// Every usable rift location on walls, the floor and furniture: clear of the surface's edges and of
+// doors and windows, far enough from the player, and not hidden from them by another surface.
+export function findRiftSpots(entries, headPos, {
+  step = 0.25, wallEdgeClearance = 0.3, surfaceEdgeClearance = 0.2, minDist = 1.2, maxDist = 7,
   floorClearance = 0.6, ceilingClearance = 0.35, unknownBelow = 1.2, unknownAbove = 1,
   random = Math.random,
 } = {}) {
@@ -92,21 +99,28 @@ export function findWallSpots(entries, headPos, {
   const skips = entries.filter((e) => e.kind === 'skip');
   const spots = [];
 
-  for (const wall of entries) {
-    if (wall.kind !== 'wall') continue;
-    const xs = wall.polygon.map((p) => p.x);
-    const zs = wall.polygon.map((p) => p.z);
+  for (const surface of entries) {
+    if (!isRiftSite(surface.kind)) continue;
+    const isWall = surface.kind === 'wall';
+    const edgeClearance = isWall ? wallEdgeClearance : surfaceEdgeClearance;
+
+    // A horizontal surface above eye level would be a ceiling or the underside of something.
+    const surfaceNormal = new THREE.Vector3().setFromMatrixColumn(surface.matrix, 1).normalize();
+    if (Math.abs(surfaceNormal.y) > 0.8 && surface.matrix.elements[13] > headPos.y - 0.1) continue;
+
+    const xs = surface.polygon.map((p) => p.x);
+    const zs = surface.polygon.map((p) => p.z);
     const [x0, x1, z0, z1] = [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
 
     for (let x = x0; x <= x1; x += step) {
       for (let z = z0; z <= z1; z += step) {
         const px = x + (random() - 0.5) * step * 0.5;
         const pz = z + (random() - 0.5) * step * 0.5;
-        if (!pointInPolygon(px, pz, wall.polygon)) continue;
-        if (distanceToEdge(px, pz, wall.polygon) < edgeClearance) continue;
+        if (!pointInPolygon(px, pz, surface.polygon)) continue;
+        if (distanceToEdge(px, pz, surface.polygon) < edgeClearance) continue;
 
-        worldPoint.set(px, 0, pz).applyMatrix4(wall.matrix);
-        if (worldPoint.y < minY || worldPoint.y > maxY) continue;
+        worldPoint.set(px, 0, pz).applyMatrix4(surface.matrix);
+        if (isWall && (worldPoint.y < minY || worldPoint.y > maxY)) continue;
         const dist = Math.hypot(worldPoint.x - headPos.x, worldPoint.z - headPos.z);
         if (dist < minDist || dist > maxDist) continue;
 
@@ -118,47 +132,45 @@ export function findWallSpots(entries, headPos, {
         if (onSkipped) continue;
 
         const pos = worldPoint.clone();
-        if (entries.some((e) => e !== wall && e.kind !== 'skip' && segmentBlockedBy(e, headPos, pos))) continue;
+        if (entries.some((e) => e !== surface && e.kind !== 'skip' && segmentBlockedBy(e, headPos, pos))) continue;
 
-        const normal = new THREE.Vector3().setFromMatrixColumn(wall.matrix, 1).normalize();
+        const normal = surfaceNormal.clone();
         if (normal.dot(localB.subVectors(headPos, pos)) < 0) normal.negate();
-        spots.push({ pos, normal, wall, local: { x: px, z: pz } });
+        spots.push({ pos, normal, surface, local: { x: px, z: pz } });
       }
     }
   }
   return spots;
 }
 
-// Greedy but random: each pick favors directions and heights not yet used, so ghosts come from all around.
-export function selectRifts(spots, headPos, count, { minSpacing = 1.3, random = Math.random } = {}) {
-  const azimuth = (spot) => Math.atan2(spot.pos.x - headPos.x, spot.pos.z - headPos.z);
-  const chosen = [];
+// Picks a surface first, each with an equal chance, so a small table isn't drowned out by a big floor.
+// Then picks a spot on it, favoring directions away from the other rifts so ghosts come from all around.
+export function pickRiftSpot(spots, headPos, taken, { minSpacing = 1.3, random = Math.random } = {}) {
+  const free = spots.filter((spot) => taken.every((position) => position.distanceTo(spot.pos) >= minSpacing));
+  if (!free.length) return null;
 
-  while (chosen.length < count) {
-    let best = null;
-    let bestScore = -Infinity;
-    for (const spot of spots) {
-      if (chosen.some((c) => c.pos.distanceTo(spot.pos) < minSpacing)) continue;
+  const surfaces = [...new Set(free.map((spot) => spot.surface))];
+  const surface = surfaces[Math.floor(random() * surfaces.length)];
 
-      let separation = 0.5;
-      let heightSpread = 0.5;
-      if (chosen.length) {
-        separation = Math.min(...chosen.map((c) => {
-          const diff = Math.abs(azimuth(c) - azimuth(spot)) % (Math.PI * 2);
-          return Math.min(diff, Math.PI * 2 - diff) / Math.PI;
-        }));
-        heightSpread = Math.min(1, Math.min(...chosen.map((c) => Math.abs(c.pos.y - spot.pos.y))));
-      }
-      const score = separation + heightSpread * 0.4 + random() * 0.5;
-      if (score > bestScore) {
-        bestScore = score;
-        best = spot;
-      }
+  const azimuth = (position) => Math.atan2(position.x - headPos.x, position.z - headPos.z);
+  let best = null;
+  let bestScore = -Infinity;
+  for (const spot of free) {
+    if (spot.surface !== surface) continue;
+    let separation = 0.5;
+    if (taken.length) {
+      separation = Math.min(...taken.map((position) => {
+        const diff = Math.abs(azimuth(position) - azimuth(spot.pos)) % (Math.PI * 2);
+        return Math.min(diff, Math.PI * 2 - diff) / Math.PI;
+      }));
     }
-    if (!best) break;
-    chosen.push(best);
+    const score = separation + random() * 0.5;
+    if (score > bestScore) {
+      bestScore = score;
+      best = spot;
+    }
   }
-  return chosen;
+  return best;
 }
 
 // ---------- Live room data ----------
@@ -274,8 +286,15 @@ export class RoomModel {
 
   // Cuts a round hole so a rift's tunnel can be seen through this surface.
   addHole(entry, x, z, radius) {
-    entry.holes.push({ x, z, radius });
+    const hole = { x, z, radius };
+    entry.holes.push(hole);
     this.rebuild(entry);
+    return hole;
+  }
+
+  removeHole(entry, hole) {
+    entry.holes = entry.holes.filter((other) => other !== hole);
+    if (this.list.includes(entry)) this.rebuild(entry);
   }
 
   // Nearest room surface along a ray, or null.

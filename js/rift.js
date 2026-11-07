@@ -1,10 +1,11 @@
-// A rift: a hole in a real wall, held in place by a spatial anchor.
+// A rift: a hole in a real surface, held in place by a spatial anchor.
 // The rift's local +Y axis is the surface normal, pointing into the room.
 import * as THREE from './three.js';
 
 export const HOLE_RADIUS = 0.16;
 const PATCH_HALF_SIZE = 0.6;      // Stand-in occluder for rifts placed where no room plane exists.
 const TUNNEL_DEPTH = 0.25;
+const ANIMATION_SECONDS = 0.5;
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
@@ -41,17 +42,29 @@ function patchGeometry() {
   return geometry;
 }
 
-// `surface`: 'room-wall' when the room model's wall hides what's behind it, 'patch' for a
-// surface the room model doesn't know about, or 'air' for no surface at all.
+// `surface`: 'room' when a room surface hides what's behind it, 'patch' for a surface the room
+// model doesn't know about, or 'air' for no surface at all.
 export function createRift(position, normal, surface) {
   const group = new THREE.Group();
   group.position.copy(position);
   group.quaternion.setFromUnitVectors(Y_AXIS, normal.clone().normalize());
 
+  // Everything that opens and closes. Ghosts are children of `group`, so they aren't affected.
+  const visual = new THREE.Group();
+  visual.scale.set(0.001, 1, 0.001);
+  group.add(visual);
+
   const rift = {
     id: 0,
     surface,
+    kind: surface,
     group,
+    visual,
+    phase: 'opening',    // opening -> open -> closing -> closed
+    phaseTime: 0,
+    quota: 0,
+    spawned: 0,
+    site: null,          // The room surface and hole, if it's cut into one.
     anchor: null,
     anchorState: 'none',
     destroyed: false,
@@ -66,17 +79,18 @@ export function createRift(position, normal, surface) {
     pulseTime: Math.random() * 10,
     ring: null,
     punch: null,
+    patch: null,
   };
 
   if (surface !== 'air') {
     if (surface === 'patch') {
-      const patch = new THREE.Mesh(patchGeometry(), new THREE.MeshBasicMaterial({
+      rift.patch = new THREE.Mesh(patchGeometry(), new THREE.MeshBasicMaterial({
         colorWrite: false,
         side: THREE.DoubleSide,
       }));
-      patch.position.y = 0.004;
-      patch.renderOrder = -10;   // Must fill the depth buffer before anything it hides is drawn.
-      group.add(patch);
+      rift.patch.position.y = 0.004;
+      rift.patch.renderOrder = -10;   // Must fill the depth buffer before anything it hides is drawn.
+      group.add(rift.patch);
     }
 
     const tunnel = new THREE.Mesh(
@@ -84,7 +98,7 @@ export function createRift(position, normal, surface) {
       new THREE.MeshBasicMaterial({ color: 0x1a0d33, side: THREE.BackSide }),
     );
     tunnel.position.y = -TUNNEL_DEPTH / 2;
-    group.add(tunnel);
+    visual.add(tunnel);
 
     const back = new THREE.Mesh(
       new THREE.CircleGeometry(HOLE_RADIUS * 0.75, 32),
@@ -92,15 +106,15 @@ export function createRift(position, normal, surface) {
     );
     back.rotation.x = -Math.PI / 2;
     back.position.y = -TUNNEL_DEPTH;
-    group.add(back);
+    visual.add(back);
 
-    // Quest 3 only: removes the real wall's depth from the hole. See depth.js.
+    // Quest 3 only: removes the real surface's depth from the hole. See depth.js.
     rift.punch = new THREE.Mesh(new THREE.CircleGeometry(HOLE_RADIUS, 32));
     rift.punch.rotation.x = -Math.PI / 2;
     rift.punch.position.y = 0.002;
     rift.punch.renderOrder = -20;
     rift.punch.visible = false;
-    group.add(rift.punch);
+    visual.add(rift.punch);
   }
 
   // A pool of light on the real surface, so the rift seems to light the room.
@@ -116,7 +130,7 @@ export function createRift(position, normal, surface) {
   );
   glow.rotation.x = -Math.PI / 2;
   glow.position.y = 0.01;
-  group.add(glow);
+  visual.add(glow);
 
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(HOLE_RADIUS - 0.006, HOLE_RADIUS + 0.018, 48),
@@ -124,7 +138,7 @@ export function createRift(position, normal, surface) {
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.014;
-  group.add(ring);
+  visual.add(ring);
   rift.ring = ring;
 
   return rift;
@@ -157,6 +171,12 @@ export function anchorRift(rift, frame, refSpace) {
   } catch (error) {
     failed(error);
   }
+}
+
+export function closeRift(rift) {
+  if (rift.phase === 'closing' || rift.phase === 'closed') return;
+  rift.phase = 'closing';
+  rift.phaseTime = 0;
 }
 
 const anchorMatrix = new THREE.Matrix4();
@@ -195,6 +215,21 @@ export function updateRift(rift, frame, refSpace, dt) {
 
   rift.pulseTime += dt;
   rift.ring.material.opacity = 0.65 + Math.sin(rift.pulseTime * 3) * 0.3;
+
+  rift.phaseTime += dt;
+  if (rift.phase === 'opening') {
+    const t = Math.min(1, rift.phaseTime / ANIMATION_SECONDS);
+    rift.visual.scale.set(Math.max(t, 0.001), 1, Math.max(t, 0.001));
+    if (t >= 1) rift.phase = 'open';
+  } else if (rift.phase === 'closing') {
+    const t = Math.max(0, 1 - rift.phaseTime / ANIMATION_SECONDS);
+    rift.visual.scale.set(Math.max(t, 0.001), 1, Math.max(t, 0.001));
+    if (t <= 0) {
+      rift.phase = 'closed';
+      rift.visual.visible = false;
+      if (rift.patch) rift.patch.visible = false;
+    }
+  }
 }
 
 export function destroyRift(rift, scene) {
