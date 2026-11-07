@@ -1,10 +1,10 @@
-// A rift: a hole in a real surface, held in place by a spatial anchor.
+// A rift: a hole in a real wall, held in place by a spatial anchor.
 // The rift's local +Y axis is the surface normal, pointing into the room.
 import * as THREE from './three.js';
 
-const HOLE_RADIUS = 0.16;
-const OCCLUDER_HALF_SIZE = 0.6;   // Keep below half of the minimum rift spacing in scan.js.
-const TUNNEL_DEPTH = 0.25;        // Shallow, so it stays behind the occluder at steep viewing angles.
+export const HOLE_RADIUS = 0.16;
+const PATCH_HALF_SIZE = 0.6;      // Stand-in occluder for rifts placed where no room plane exists.
+const TUNNEL_DEPTH = 0.25;
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
@@ -25,10 +25,8 @@ export function createShadowTexture() {
 
 let glowTexture = null;
 
-// A flat invisible surface with a round hole. It writes depth only, so the camera feed
-// stays visible while anything behind it (the tunnel, an emerging ghost) gets hidden.
-function occluderGeometry() {
-  const size = OCCLUDER_HALF_SIZE;
+function patchGeometry() {
+  const size = PATCH_HALF_SIZE;
   const shape = new THREE.Shape();
   shape.moveTo(-size, -size);
   shape.lineTo(size, -size);
@@ -43,19 +41,19 @@ function occluderGeometry() {
   return geometry;
 }
 
-export function createRift(position, normal, kind) {
+// `surface`: 'room-wall' when the room model's wall hides what's behind it, 'patch' for a
+// surface the room model doesn't know about, or 'air' for no surface at all.
+export function createRift(position, normal, surface) {
   const group = new THREE.Group();
   group.position.copy(position);
   group.quaternion.setFromUnitVectors(Y_AXIS, normal.clone().normalize());
 
   const rift = {
     id: 0,
-    kind,
+    surface,
     group,
     anchor: null,
     anchorState: 'none',
-    anchorMethod: '-',
-    anchorRetry: false,
     destroyed: false,
     tracked: false,
     anchorOffset: null,
@@ -65,31 +63,21 @@ export function createRift(position, normal, kind) {
     firstAnchorPos: null,
     maxJump: 0,
     drift: 0,
-    debugParts: [],
     pulseTime: Math.random() * 10,
     ring: null,
+    punch: null,
   };
 
-  if (kind !== 'air') {
-    const occluderGeo = occluderGeometry();
-    const occluder = new THREE.Mesh(occluderGeo, new THREE.MeshBasicMaterial({
-      colorWrite: false,
-      side: THREE.DoubleSide,
-    }));
-    occluder.position.y = 0.004;
-    occluder.renderOrder = -10;   // Must fill the depth buffer before anything it hides is drawn.
-    group.add(occluder);
-
-    const outline = new THREE.Mesh(occluderGeo, new THREE.MeshBasicMaterial({
-      color: 0xff40c0,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.5,
-    }));
-    outline.position.y = 0.012;
-    outline.visible = false;
-    group.add(outline);
-    rift.debugParts.push(outline);
+  if (surface !== 'air') {
+    if (surface === 'patch') {
+      const patch = new THREE.Mesh(patchGeometry(), new THREE.MeshBasicMaterial({
+        colorWrite: false,
+        side: THREE.DoubleSide,
+      }));
+      patch.position.y = 0.004;
+      patch.renderOrder = -10;   // Must fill the depth buffer before anything it hides is drawn.
+      group.add(patch);
+    }
 
     const tunnel = new THREE.Mesh(
       new THREE.CylinderGeometry(HOLE_RADIUS, HOLE_RADIUS * 0.75, TUNNEL_DEPTH, 32, 1, true),
@@ -105,6 +93,14 @@ export function createRift(position, normal, kind) {
     back.rotation.x = -Math.PI / 2;
     back.position.y = -TUNNEL_DEPTH;
     group.add(back);
+
+    // Quest 3 only: removes the real wall's depth from the hole. See depth.js.
+    rift.punch = new THREE.Mesh(new THREE.CircleGeometry(HOLE_RADIUS, 32));
+    rift.punch.rotation.x = -Math.PI / 2;
+    rift.punch.position.y = 0.002;
+    rift.punch.renderOrder = -20;
+    rift.punch.visible = false;
+    group.add(rift.punch);
   }
 
   // A pool of light on the real surface, so the rift seems to light the room.
@@ -134,42 +130,22 @@ export function createRift(position, normal, kind) {
   return rift;
 }
 
-// Must be called inside an XR frame. A failed hit-result anchor is retried once from the frame.
-export function anchorRift(rift, frame, refSpace, hitResult) {
-  let method = null;
-  let run = null;
-  if (hitResult?.createAnchor) {
-    method = 'hit-result';
-    run = () => hitResult.createAnchor();
-  } else if (frame.createAnchor) {
-    method = 'frame';
-    run = () => {
-      const p = rift.group.position;
-      const q = rift.group.quaternion;
-      const transform = new XRRigidTransform(
-        { x: p.x, y: p.y, z: p.z, w: 1 },
-        { x: q.x, y: q.y, z: q.z, w: q.w },
-      );
-      return frame.createAnchor(transform, refSpace);
-    };
-  }
-
-  if (!run) {
+// Must be called inside an XR frame.
+export function anchorRift(rift, frame, refSpace) {
+  if (!frame.createAnchor) {
     rift.anchorState = 'unsupported';
     return;
   }
-
   rift.anchorState = 'pending';
-  rift.anchorMethod = method;
-  const failed = (error) => {
-    if (method === 'hit-result') {
-      rift.anchorRetry = true;
-    } else {
-      rift.anchorState = `failed: ${error?.name || error}`;
-    }
-  };
+  const p = rift.group.position;
+  const q = rift.group.quaternion;
+  const failed = (error) => { rift.anchorState = `failed: ${error?.name || error}`; };
   try {
-    run().then((anchor) => {
+    const transform = new XRRigidTransform(
+      { x: p.x, y: p.y, z: p.z, w: 1 },
+      { x: q.x, y: q.y, z: q.z, w: q.w },
+    );
+    frame.createAnchor(transform, refSpace).then((anchor) => {
       if (rift.destroyed) {
         anchor?.delete?.();
         return;
@@ -188,11 +164,6 @@ const targetMatrix = new THREE.Matrix4();
 const unitScale = new THREE.Vector3();
 
 export function updateRift(rift, frame, refSpace, dt) {
-  if (rift.anchorRetry) {
-    rift.anchorRetry = false;
-    anchorRift(rift, frame, refSpace, null);
-  }
-
   if (rift.anchor) {
     const pose = frame.getPose(rift.anchor.anchorSpace, refSpace);
     rift.tracked = !!pose && (frame.trackedAnchors ? frame.trackedAnchors.has(rift.anchor) : true);
@@ -226,16 +197,12 @@ export function updateRift(rift, frame, refSpace, dt) {
   rift.ring.material.opacity = 0.65 + Math.sin(rift.pulseTime * 3) * 0.3;
 }
 
-export function setRiftDebug(rift, on) {
-  rift.debugParts.forEach((part) => { part.visible = on; });
-}
-
 export function destroyRift(rift, scene) {
   rift.destroyed = true;
   rift.anchor?.delete?.();
   scene.remove(rift.group);
   rift.group.traverse((obj) => {
     obj.geometry?.dispose();
-    obj.material?.dispose();
+    if (obj !== rift.punch) obj.material?.dispose();
   });
 }

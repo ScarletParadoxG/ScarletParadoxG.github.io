@@ -29,16 +29,15 @@ export class Ghost {
     this.done = false;
     this.deathTime = 0;
     this.time = Math.random() * 10;
-    this.opacity = 0.9;
     this.brightness = 1;
 
     this.bodyMaterial = new THREE.MeshBasicMaterial({
       color: 0xbfe8ff,
       transparent: true,
-      opacity: this.opacity,
+      opacity: 0.9,
       side: THREE.DoubleSide,
     });
-    this.eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x0c1020, transparent: true, opacity: this.opacity });
+    this.eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x0c1020, transparent: true, opacity: 0.9 });
 
     this.mesh = new THREE.Group();
     this.body = new THREE.Mesh(bodyGeometry, this.bodyMaterial);
@@ -66,7 +65,7 @@ export class Ghost {
     return this.mesh.getWorldPosition(target);
   }
 
-  // Inside the surface it can't be seen except through the hole, so it isn't a fair target.
+  // Inside the wall it can only be glimpsed through the hole, so it isn't a fair target yet.
   get shootable() {
     return this.alive && (this.phase === 'chase' || this.mesh.position.y > 0);
   }
@@ -90,8 +89,9 @@ export class Ghost {
     this.shadow.material.dispose();
   }
 
-  // Returns 'reached' on the frame it gets to the player.
-  update(dt, viewerPos, { paused, floorY, occluded, brightness }) {
+  // `shadowSurface` finds the height of whatever is under a point, or null if nothing is known.
+  // Returns 'reached' on the frame the ghost gets to the player.
+  update(dt, viewerPos, { paused, shadowSurface, brightness }) {
     this.time += dt;
 
     if (!this.alive) {
@@ -126,14 +126,12 @@ export class Ghost {
     this.body.rotation.z = Math.sin(this.time * 1.4) * 0.06;
     this.mesh.lookAt(viewerPos);
 
-    this.opacity += ((occluded ? 0.15 : 0.9) - this.opacity) * Math.min(1, dt * 8);
-    this.applyOpacity(this.opacity);
     if (brightness !== this.brightness) {
       this.brightness = brightness;
       this.bodyMaterial.color.setHex(0xbfe8ff).multiplyScalar(brightness);
     }
 
-    this.updateShadow(floorY);
+    this.updateShadow(shadowSurface);
     return result;
   }
 
@@ -142,17 +140,18 @@ export class Ghost {
     this.eyeMaterial.opacity = value;
   }
 
-  updateShadow(floorY) {
+  updateShadow(shadowSurface) {
     const emerged = this.phase === 'chase' || this.mesh.position.y > 0.1;
     this.getWorldPosition(worldPos);
-    const height = floorY === null ? -1 : worldPos.y - floorY;
-    if (!emerged || height <= 0) {
+    const surfaceY = emerged ? shadowSurface(worldPos.x, worldPos.y, worldPos.z) : null;
+    const height = surfaceY === null ? -1 : worldPos.y - surfaceY;
+    if (height <= 0) {
       this.shadow.visible = false;
       return;
     }
     // Soft and directly below, since the room's real light direction isn't known.
     this.shadow.visible = true;
-    this.shadow.position.set(worldPos.x, floorY + 0.012, worldPos.z);
+    this.shadow.position.set(worldPos.x, surfaceY + 0.012, worldPos.z);
     this.shadow.scale.setScalar(1 + height * 0.35);
     this.shadow.material.opacity = THREE.MathUtils.clamp(1.1 - height * 0.35, 0.3, 1);
   }

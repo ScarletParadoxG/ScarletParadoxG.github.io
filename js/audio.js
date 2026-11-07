@@ -1,5 +1,5 @@
-// Directional ghost audio using Web Audio HRTF panning. Speakers alone give weak direction cues,
-// so pitch rises with height and sounds behind the player are muffled.
+// Directional ghost audio using Web Audio HRTF panning, following the headset.
+// Pitch also rises with height and sounds behind the player are muffled, as extra cues.
 
 function setParam(param, value, ctx, smoothing = 0.05) {
   param.setTargetAtTime(value, ctx.currentTime, smoothing);
@@ -14,28 +14,26 @@ export class SpatialAudio {
     this.listenerFwd = null;
   }
 
-  // Call directly from a tap. iOS only starts audio during a user gesture.
+  // Call directly from a click, since browsers only start audio during a user gesture.
   unlock() {
     if (!this.ctx) {
       const Context = window.AudioContext || window.webkitAudioContext;
       if (!Context) return;
-      // Ask iOS to keep playing when the silent switch is on, where supported.
-      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* optional */ }
       this.ctx = new Context();
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.9;
       this.master.connect(this.ctx.destination);
     }
     this.resume();
-    // A silent one-sample buffer finishes unlocking on older iOS versions.
-    const source = this.ctx.createBufferSource();
-    source.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
-    source.connect(this.ctx.destination);
-    source.start();
   }
 
   resume() {
     if (this.ctx && this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
+  }
+
+  // Quiet while the system menu is covering the game.
+  setMuted(muted) {
+    if (this.master) this.master.gain.setTargetAtTime(muted ? 0 : 0.9, this.ctx.currentTime, 0.05);
   }
 
   get state() {

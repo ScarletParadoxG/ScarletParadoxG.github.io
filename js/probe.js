@@ -1,16 +1,24 @@
-// Starts a throwaway AR session asking for every feature of interest, then reports what was granted.
-// The game itself only requests what it uses, so speculative features can't destabilize it.
+// Starts a short AR session, asks for everything, and reports what this headset really provides.
+// It runs for a few seconds because room planes aren't available right away.
 const PROBE_FEATURES = [
-  'local', 'local-floor', 'hit-test', 'anchors', 'dom-overlay',
-  'plane-detection', 'mesh-detection', 'depth-sensing', 'light-estimation', 'camera-access',
+  'local-floor', 'plane-detection', 'mesh-detection', 'anchors', 'hit-test', 'depth-sensing',
+  'hand-tracking', 'light-estimation', 'camera-access', 'dom-overlay',
 ];
 
-const GLOBALS = ['XRSession', 'XRWebGLLayer', 'XRWebGLBinding', 'XRRigidTransform', 'XRRay',
-  'XRHitTestSource', 'XRHitTestResult', 'XRAnchor'];
+const PROBE_SECONDS = 4;
 
 function hasMethod(className, method) {
   const proto = window[className]?.prototype;
   return !!proto && method in proto;
+}
+
+function tally(items, labelOf) {
+  const counts = {};
+  for (const item of items) {
+    const label = labelOf(item);
+    counts[label] = (counts[label] || 0) + 1;
+  }
+  return Object.entries(counts).map(([label, count]) => `${label} x${count}`).join(', ') || 'none';
 }
 
 export async function probeFeatures(overlayRoot) {
@@ -25,49 +33,39 @@ export async function probeFeatures(overlayRoot) {
 
   let session;
   try {
-    // Requested before any other await, so the tap still counts as a user gesture.
+    // Requested before any other await, so the click still counts as a user gesture.
     session = await navigator.xr.requestSession('immersive-ar', {
       optionalFeatures: PROBE_FEATURES,
       domOverlay: { root: overlayRoot },
-      depthSensing: {
-        usagePreference: ['cpu-optimized', 'gpu-optimized'],
-        dataFormatPreference: ['luminance-alpha', 'float32'],
-      },
+      depthSensing: { usagePreference: ['gpu-optimized'], dataFormatPreference: [] },
     });
   } catch (error) {
-    lines.push(`Full feature request rejected: ${error.name}: ${error.message}`);
-    try {
-      session = await navigator.xr.requestSession('immersive-ar');
-      lines.push('Bare immersive-ar session started.');
-    } catch (bareError) {
-      lines.push(`Bare session rejected: ${bareError.name}: ${bareError.message}`);
-    }
+    lines.push(`Session rejected: ${error.name}: ${error.message}`);
+    return lines.join('\n');
   }
 
-  lines.push(`Globals present: ${GLOBALS.filter((name) => name in window).join(', ') || 'none'}`);
-  lines.push(`Globals missing: ${GLOBALS.filter((name) => !(name in window)).join(', ') || 'none'}`);
-  lines.push(`XRFrame.createAnchor: ${hasMethod('XRFrame', 'createAnchor')}`);
-  lines.push(`XRHitTestResult.createAnchor: ${hasMethod('XRHitTestResult', 'createAnchor')}`);
-  lines.push(`getUserMedia present: ${!!navigator.mediaDevices?.getUserMedia}`);
-  lines.push(`audioSession API: ${!!navigator.audioSession}`);
-
-  if (!session) return lines.join('\n');
-
-  const enabled = session.enabledFeatures;
+  const enabled = session.enabledFeatures ? [...session.enabledFeatures] : null;
   if (enabled) {
-    const granted = [...enabled];
-    lines.push(`Granted: ${granted.join(', ') || 'none'}`);
-    lines.push(`Not granted: ${PROBE_FEATURES.filter((f) => !granted.includes(f)).join(', ') || 'none'}`);
+    lines.push(`Granted: ${enabled.join(', ') || 'none'}`);
+    lines.push(`Not granted: ${PROBE_FEATURES.filter((f) => !enabled.includes(f)).join(', ') || 'none'}`);
   } else {
     lines.push('session.enabledFeatures is missing, so grants cannot be read directly.');
   }
-  lines.push(`requestHitTestSource: ${typeof session.requestHitTestSource === 'function'}`);
-  lines.push(`DOM overlay: ${session.domOverlayState?.type || 'none'}`);
   lines.push(`Blend mode: ${session.environmentBlendMode || 'unknown'}`);
+  lines.push(`DOM overlay: ${session.domOverlayState?.type || 'none'}`);
+  lines.push(`Room capture available: ${typeof session.initiateRoomCapture === 'function'}`);
+  lines.push(`frame.createAnchor: ${hasMethod('XRFrame', 'createAnchor')}`);
+  lines.push(`Projection layers: ${session.renderState.layers !== undefined}`);
   try {
-    lines.push(`Depth usage: ${session.depthUsage || 'none'}`);
+    lines.push(`Depth: usage ${session.depthUsage || 'none'}, format ${session.depthDataFormat || 'none'}`);
   } catch {
-    lines.push('Depth usage: none');
+    lines.push('Depth: none');
+  }
+
+  try {
+    await inspectFrames(session, lines);
+  } catch (error) {
+    lines.push(`Frame checks failed: ${error.name}: ${error.message}`);
   }
 
   try {
@@ -76,4 +74,70 @@ export async function probeFeatures(overlayRoot) {
     lines.push(`Session end failed: ${error.message}`);
   }
   return lines.join('\n');
+}
+
+async function inspectFrames(session, lines) {
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl2', { xrCompatible: true, alpha: true });
+  await gl.makeXRCompatible?.();
+  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl, { alpha: true }) });
+
+  const refSpace = await session.requestReferenceSpace('local-floor')
+    .then((space) => { lines.push('Reference space: local-floor'); return space; })
+    .catch(() => {
+      lines.push('Reference space: local');
+      return session.requestReferenceSpace('local');
+    });
+
+  let hitSource = null;
+  if (session.requestHitTestSource) {
+    try {
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      hitSource = await session.requestHitTestSource({ space: viewerSpace });
+    } catch (error) {
+      lines.push(`Hit test source failed: ${error.name}`);
+    }
+  }
+
+  let frames = 0;
+  let hits = 0;
+  let anchorResult = 'not tried';
+
+  await new Promise((resolve) => {
+    const started = performance.now();
+    const onFrame = (time, frame) => {
+      frames++;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      if (hitSource && frame.getHitTestResults(hitSource).length) hits++;
+      if (frames === 10 && frame.createAnchor) {
+        try {
+          anchorResult = 'pending';
+          frame.createAnchor(new XRRigidTransform(), refSpace).then(
+            (anchor) => { anchorResult = 'created'; anchor?.delete?.(); },
+            (error) => { anchorResult = `rejected: ${error.name}`; },
+          );
+        } catch (error) {
+          anchorResult = `threw: ${error.name}`;
+        }
+      }
+      if (performance.now() - started >= PROBE_SECONDS * 1000) {
+        // Read while this frame is still active.
+        const planes = frame.detectedPlanes;
+        lines.push(`Planes: ${planes ? `${planes.size}: ${tally(planes, (p) => `${p.semanticLabel || 'unlabeled'}/${p.orientation || '?'}`)}` : 'API missing'}`);
+        const meshes = frame.detectedMeshes;
+        lines.push(`Meshes: ${meshes ? `${meshes.size}: ${tally(meshes, (m) => m.semanticLabel || 'unlabeled')}` : 'API missing'}`);
+        resolve();
+        return;
+      }
+      session.requestAnimationFrame(onFrame);
+    };
+    session.requestAnimationFrame(onFrame);
+  });
+
+  lines.push(`Frames in ${PROBE_SECONDS} s: ${frames}`);
+  lines.push(`Hit test: ${hitSource ? `${hits} frames with results` : 'unavailable'}`);
+  lines.push(`Anchor test: ${anchorResult}`);
+  lines.push(`Input sources: ${tally(session.inputSources, (s) => `${s.handedness}/${s.targetRayMode}/${s.hand ? 'hand' : 'controller'}`)}`);
 }
