@@ -12,7 +12,7 @@ const $ = (id) => document.getElementById(id);
 
 const NO_ROOM_GRACE_SECONDS = 3;   // Room planes can take 2 to 3 seconds to appear.
 const BEST_SCORE_KEY = 'ghostHunter.bestScore';
-const emptyKills = () => ({ normal: 0, small: 0, big: 0 });
+const emptyKills = () => ({ ghost: 0, wisp: 0, phantom: 0 });
 
 const G = {
   state: 'idle',            // idle -> title -> playing -> gameover -> playing ...
@@ -20,8 +20,7 @@ const G = {
   refType: 'local',
   rifts: [],
   ghosts: [],
-  spotCount: 0,
-  pending: [],
+  pending: [],             // Actions waiting for the next XR frame, which anchors need.
   sessionTime: 0,
   roomCaptureUsed: false,
   titleShown: false,
@@ -35,7 +34,6 @@ const G = {
   uiTimer: 0,
   lastTime: 0,
   tracked: true,
-  voicesMuted: false,
   message: '',
   messageUntil: 0,
   flash: 0,
@@ -43,7 +41,9 @@ const G = {
 
 const audio = new SpatialAudio();
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(70, 1, 0.05, 40);
+// In a session, the headset sets the camera's pose and projection. The near and far values here
+// match the WebXR defaults, so three.js never changes the range that Quest 3's depth data is read in.
+const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 1000);
 const room = new RoomModel(scene);
 const depth = new DepthOcclusion();
 const pointers = new Pointers(scene);
@@ -152,7 +152,8 @@ async function startSession(session) {
   session.addEventListener('select', (event) => {
     G.pending.push(() => handleSelect(event.inputSource));
   });
-  session.addEventListener('squeeze', togglePanel);
+  session.addEventListener('squeeze', recenterPanel);
+  audio.setMuted(false);
   session.addEventListener('visibilitychange', () => {
     audio.setMuted(session.visibilityState !== 'visible');
   });
@@ -187,7 +188,6 @@ function onSessionEnd() {
   G.session = null;
   G.score = 0;
   H.known = false;
-  syncVoiceMute(false);
   gazeCursor.visible = false;
   damageFlash.visible = false;
   G.state = 'idle';
@@ -224,10 +224,8 @@ function onFrame(time, frame) {
   G.pending = [];
   actions.forEach((action) => action(frame, refSpace));
 
-  // Tracking loss, the system menu and the in-game menu all stop the game.
-  const paused = G.state === 'playing' && !!panel?.visible;
-  const active = G.tracked && G.session?.visibilityState === 'visible' && !paused;
-  syncVoiceMute(paused);
+  // Positions can't be trusted without tracking, and the system menu covers the game.
+  const active = G.tracked && G.session?.visibilityState === 'visible';
 
   depth.update(renderer, G.rifts);
   updateRifts(frame, refSpace, dt);
@@ -244,12 +242,6 @@ function onFrame(time, frame) {
   updateToast();
   scoreHud?.update(G.state === 'playing', G.score, Math.max(G.score, G.best), H.pos, H.quat, H.up, H.fwd);
   renderer.render(scene, camera);
-}
-
-function syncVoiceMute(muted) {
-  if (muted === G.voicesMuted) return;
-  G.voicesMuted = muted;
-  audio.setVoicesMuted(muted);
 }
 
 // ---------- Aiming ----------
@@ -270,7 +262,10 @@ function updateAim() {
     }
     pointers.drawLaser(pointer, length);
   }
-  panel?.setHover(hovered);
+  if (panel && panel.hovered !== hovered) {
+    panel.setHover(hovered);
+    G.uiTimer = 0;   // Redraw now, so the highlight follows the laser.
+  }
 
   const noPointers = pointers.list.length === 0 && H.known;
   gazeCursor.visible = noPointers;
@@ -294,7 +289,7 @@ function handleSelect(source) {
     return;
   }
 
-  if (G.state === 'playing' && !panel?.visible) {
+  if (G.state === 'playing') {
     if (pointer) pointers.fire(pointer);
     shoot(origin, direction, pointer);
   }
@@ -446,7 +441,7 @@ function startRound(frame, refSpace) {
   }
   panel?.hide();
   G.state = 'playing';
-  say('Pull the trigger to shoot. Grip pauses the game.', 4);
+  say('Aim with the laser and pull the trigger to shoot.', 4);
 }
 
 function gameOver() {
@@ -468,12 +463,12 @@ function pickGhostType() {
     if (G.playTime < from) return 0;
     return 0.1 + (maxShare - 0.1) * Math.min(1, (G.playTime - from) / CONFIG.mixRampSeconds);
   };
-  const big = share(CONFIG.bigGhostsFrom, CONFIG.bigGhostsMaxShare);
-  const small = share(CONFIG.smallGhostsFrom, CONFIG.smallGhostsMaxShare);
+  const phantoms = share(CONFIG.phantomsFrom, CONFIG.phantomsMaxShare);
+  const wisps = share(CONFIG.wispsFrom, CONFIG.wispsMaxShare);
   const roll = Math.random();
-  if (roll < big) return 'big';
-  if (roll < big + small) return 'small';
-  return 'normal';
+  if (roll < phantoms) return 'phantom';
+  if (roll < phantoms + wisps) return 'wisp';
+  return 'ghost';
 }
 
 function spawnGhost(typeName, rift) {
@@ -494,7 +489,7 @@ function updateGhosts(dt, active) {
   let reached = false;
   for (const ghost of G.ghosts) {
     const result = ghost.update(dt, H.pos, {
-      paused: !active,                 // World-locked positions can't be trusted without tracking.
+      paused: !active,
       shadowSurface,
     });
     if (result === 'reached') reached = true;
@@ -517,19 +512,15 @@ function updateEffects(dt) {
 
 // ---------- Interface inside the headset ----------
 
-// Grip pauses during play. Otherwise it brings the menu back in front of the player.
-function togglePanel() {
-  if (!panel) return;
-  if (G.state === 'playing' && panel.visible) panel.hide();
-  else panel.showInFront(H.pos, H.fwd);
-  G.uiTimer = 0;
+// Grip brings the menu back in front of the player, if they've turned away from it.
+function recenterPanel() {
+  if (panel && G.state !== 'playing') panel.showInFront(H.pos, H.fwd);
 }
 
 function runButton(id) {
   G.uiTimer = 0;
   switch (id) {
     case 'start': G.pending.push(startRound); break;
-    case 'resume': panel.hide(); break;
     case 'capture':
       G.roomCaptureUsed = true;
       G.session.initiateRoomCapture().catch?.(() => {});
@@ -549,12 +540,11 @@ function refreshPanel() {
 
   if (G.state === 'title') {
     if (!H.known) return;
-    G.spotCount = findRiftSpots(room.list, H.pos).length;
     if (!G.titleShown) {
       panel.showInFront(H.pos, H.fwd);
       G.titleShown = true;
     }
-    const noRoom = G.sessionTime > NO_ROOM_GRACE_SECONDS && G.spotCount === 0;
+    const noRoom = G.sessionTime > NO_ROOM_GRACE_SECONDS && findRiftSpots(room.list, H.pos).length === 0;
     const lines = [`High score: ${G.best}`];
     const buttons = [{ id: 'start', label: 'Start game', primary: true }];
     if (noRoom) {
@@ -571,15 +561,9 @@ function refreshPanel() {
     panel.setContent('Game over', [
       { big: String(G.score) },
       G.newBest ? 'A new high score!' : `High score: ${G.best}`,
-      `Survived ${formatTime(G.playTime)}. Defeated ${G.kills.normal} ghosts, ${G.kills.small} wisps and ${G.kills.big} brutes.`,
+      `Survived ${formatTime(G.playTime)}. Defeated ${G.kills.ghost} ghosts, ${G.kills.wisp} wisps and ${G.kills.phantom} phantoms.`,
     ], [
       { id: 'start', label: 'Play again', primary: true },
-      { id: 'exit', label: 'Exit' },
-    ]);
-  } else if (panel.visible) {
-    panel.setContent('Paused', [`Score: ${G.score}`, `Time: ${formatTime(G.playTime)}`], [
-      { id: 'resume', label: 'Resume', primary: true },
-      { id: 'start', label: 'Restart' },
       { id: 'exit', label: 'Exit' },
     ]);
   }

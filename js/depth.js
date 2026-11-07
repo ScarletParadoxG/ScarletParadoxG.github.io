@@ -5,10 +5,11 @@
 //  - A small bias, because depth is noisy and would otherwise flicker against anything on a surface.
 //  - A "punch" through each rift's hole. The real surface is in front of the tunnel, so without this
 //    sensed depth would hide it. Anything real in front of the surface still hides the rift.
+// Depth from stereo cameras gets noisier with distance, so both tolerances grow as (1 + distance).
 import * as THREE from './three.js';
 
-const DEPTH_BIAS_METERS = 0.04;
-const IN_FRONT_OF_SURFACE_METERS = 0.15;
+const DEPTH_BIAS_METERS = 0.03;
+const IN_FRONT_OF_SURFACE_METERS = 0.08;
 
 // Each eye is one layer of the depth texture, and the eyes sit side by side in the framebuffer.
 const SAMPLE_DEPTH = /* glsl */`
@@ -39,7 +40,12 @@ uniform float depthBias;
 
 void main() {
   float d = sampleSensedDepth();
-  gl_FragDepth = d >= 1.0 ? 1.0 : clamp(fromMeters(toMeters(d) + depthBias), 0.0, 1.0);
+  if (d >= 1.0) {
+    gl_FragDepth = 1.0;   // Nothing was sensed here.
+    return;
+  }
+  float meters = toMeters(d);
+  gl_FragDepth = clamp(fromMeters(meters + depthBias * (1.0 + meters)), 0.0, 1.0);
 }
 `;
 
@@ -54,7 +60,8 @@ ${SAMPLE_DEPTH}
 uniform float inFrontMargin;
 
 void main() {
-  if (toMeters(sampleSensedDepth()) < toMeters(gl_FragCoord.z) - inFrontMargin) discard;
+  float surface = toMeters(gl_FragCoord.z);
+  if (toMeters(sampleSensedDepth()) < surface - inFrontMargin * (1.0 + surface)) discard;
   gl_FragDepth = 1.0;
 }
 `;

@@ -3,89 +3,77 @@
 import * as THREE from './three.js';
 import { createShadowTexture } from './rift.js';
 
-const BODY_COLOR = 0xbfe8ff;
+const BODY_COLOR = new THREE.Color(0xbfe8ff);
+const FLASH_COLOR = new THREE.Color(0xffffff);
 const FEATURE_COLOR = 0x0c1020;
 const EMERGE_START = -0.2;      // Starts inside the tunnel, behind the real surface.
 const FITS_THROUGH_RIFT = 0.42; // The largest scale that passes through the hole.
 const FLASH_SECONDS = 0.12;
 const KNOCKBACK = 0.12;
 
+// A body made by spinning a profile of [radius, height] points around the vertical axis.
+// `hem` optionally shapes the bottom edge into scallops or points.
 function latheBody(profile, hem) {
   const geometry = new THREE.LatheGeometry(profile.map(([x, y]) => new THREE.Vector2(x, y)), 28);
   if (hem) {
-    // Shapes the bottom edge into scallops or points, depending on the type.
     const position = geometry.attributes.position;
+    const bottom = profile[profile.length - 1][1];
     for (let i = 0; i < position.count; i++) {
       const y = position.getY(i);
       if (y > hem.from) continue;
       const wave = Math.abs(Math.sin(Math.atan2(position.getX(i), position.getZ(i)) * hem.waves));
-      const blend = (hem.from - y) / (hem.from - profile[profile.length - 1][1]);
+      const blend = (hem.from - y) / (hem.from - bottom);
       position.setY(i, y + (hem.pointed ? wave : wave * wave) * hem.depth * blend);
     }
   }
   return geometry;
 }
 
-function part(geometry, material, x, y, z, { scale, rotation } = {}) {
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.position.set(x, y, z);
-  if (scale) mesh.scale.set(...scale);
-  if (rotation) mesh.rotation.set(...rotation);
-  return mesh;
-}
+const ROUND_EYE = new THREE.SphereGeometry(0.038, 12, 8);
+const LARGE_EYE = new THREE.SphereGeometry(0.085, 14, 10);
+const FEATURE = new THREE.SphereGeometry(0.05, 12, 8);
+const TOOTH = new THREE.ConeGeometry(0.022, 0.05, 6);
 
-// Each type has its own silhouette and way of moving, so they can be told apart at any distance.
+// Each type has its own silhouette, face and way of moving, so they can be told apart at any distance.
+// In `features`, a part is dark unless `bodyColored` is set. Geometry is shared between ghosts of a type.
 const LOOKS = {
   // A classic sheet ghost: round head, scalloped hem and two round eyes.
-  normal: {
-    sway: 1.4,
-    swayAmount: 0.06,
-    build(body, feature) {
-      body.geometry = latheBody(
-        [[0.001, 0.36], [0.12, 0.34], [0.2, 0.27], [0.24, 0.16], [0.25, 0], [0.26, -0.18], [0.29, -0.34], [0.33, -0.42]],
-        { from: -0.3, waves: 4, depth: 0.1 },
-      );
-      const eye = new THREE.SphereGeometry(0.038, 12, 8);
-      body.add(part(eye, feature, -0.08, 0.17, 0.2), part(eye, feature, 0.08, 0.17, 0.2));
-    },
+  ghost: {
+    sway: { speed: 1.4, amount: 0.06 },
+    body: latheBody(
+      [[0.001, 0.36], [0.12, 0.34], [0.2, 0.27], [0.24, 0.16], [0.25, 0], [0.26, -0.18], [0.29, -0.34], [0.33, -0.42]],
+      { from: -0.3, waves: 4, depth: 0.1 },
+    ),
+    features: [
+      { geometry: ROUND_EYE, position: [-0.08, 0.17, 0.2] },
+      { geometry: ROUND_EYE, position: [0.08, 0.17, 0.2] },
+    ],
   },
   // A darting wisp: a teardrop with a pointed tail and one large eye. It weaves as it flies.
-  small: {
-    sway: 5,
-    swayAmount: 0.3,
+  wisp: {
+    sway: { speed: 5, amount: 0.3 },
     weave: { speed: 7, amount: 0.07 },
-    build(body, feature) {
-      body.geometry = latheBody(
-        [[0.001, 0.32], [0.1, 0.3], [0.18, 0.22], [0.21, 0.08], [0.17, -0.08], [0.1, -0.24], [0.04, -0.4], [0.001, -0.52]],
-      );
-      body.add(part(new THREE.SphereGeometry(0.085, 14, 10), feature, 0, 0.12, 0.15));
-    },
+    body: latheBody(
+      [[0.001, 0.32], [0.1, 0.3], [0.18, 0.22], [0.21, 0.08], [0.17, -0.08], [0.1, -0.24], [0.04, -0.4], [0.001, -0.52]],
+    ),
+    features: [
+      { geometry: LARGE_EYE, position: [0, 0.12, 0.15] },
+    ],
   },
-  // A hulking brute: broad shoulders, horns, arms, slanted eyes and a toothed mouth.
-  big: {
-    sway: 0.8,
-    swayAmount: 0.04,
-    build(body, feature, material) {
-      body.geometry = latheBody(
-        [[0.001, 0.3], [0.16, 0.3], [0.27, 0.24], [0.31, 0.1], [0.32, -0.1], [0.35, -0.3], [0.4, -0.42]],
-        { from: -0.28, waves: 5, depth: 0.14, pointed: true },
-      );
-      const horn = new THREE.ConeGeometry(0.055, 0.2, 10);
-      const arm = new THREE.CapsuleGeometry(0.06, 0.16, 4, 10);
-      const eye = new THREE.SphereGeometry(0.05, 12, 8);
-      const tooth = new THREE.ConeGeometry(0.022, 0.05, 6);
-      body.add(
-        part(horn, material, -0.17, 0.36, 0, { rotation: [0, 0, 0.45] }),
-        part(horn, material, 0.17, 0.36, 0, { rotation: [0, 0, -0.45] }),
-        part(arm, material, -0.37, -0.05, 0.03, { rotation: [0, 0, -0.5] }),
-        part(arm, material, 0.37, -0.05, 0.03, { rotation: [0, 0, 0.5] }),
-        part(eye, feature, -0.11, 0.13, 0.285, { scale: [1.35, 0.65, 0.6], rotation: [0, 0, -0.45] }),
-        part(eye, feature, 0.11, 0.13, 0.285, { scale: [1.35, 0.65, 0.6], rotation: [0, 0, 0.45] }),
-        part(new THREE.SphereGeometry(0.05, 12, 8), feature, 0, -0.07, 0.315, { scale: [2.8, 1.3, 0.5] }),
-        part(tooth, material, -0.065, -0.03, 0.34, { rotation: [Math.PI, 0, 0] }),
-        part(tooth, material, 0.065, -0.03, 0.34, { rotation: [Math.PI, 0, 0] }),
-      );
-    },
+  // A looming phantom: broad, with a jagged hem, slanted eyes and a toothed mouth. It sways slowly.
+  phantom: {
+    sway: { speed: 0.8, amount: 0.04 },
+    body: latheBody(
+      [[0.001, 0.3], [0.16, 0.3], [0.27, 0.24], [0.31, 0.1], [0.32, -0.1], [0.35, -0.3], [0.4, -0.42]],
+      { from: -0.28, waves: 5, depth: 0.14, pointed: true },
+    ),
+    features: [
+      { geometry: FEATURE, position: [-0.11, 0.13, 0.285], scale: [1.35, 0.65, 0.6], rotation: [0, 0, -0.45] },
+      { geometry: FEATURE, position: [0.11, 0.13, 0.285], scale: [1.35, 0.65, 0.6], rotation: [0, 0, 0.45] },
+      { geometry: FEATURE, position: [0, -0.07, 0.315], scale: [2.8, 1.3, 0.5] },
+      { geometry: TOOTH, position: [-0.065, -0.03, 0.34], rotation: [Math.PI, 0, 0], bodyColored: true },
+      { geometry: TOOTH, position: [0.065, -0.03, 0.34], rotation: [Math.PI, 0, 0], bodyColored: true },
+    ],
   },
 };
 
@@ -93,8 +81,6 @@ let shadowTexture = null;
 const worldPos = new THREE.Vector3();
 const toTarget = new THREE.Vector3();
 const surfaceNormal = new THREE.Vector3();
-const FLASH_COLOR = new THREE.Color(0xffffff);
-const BASE_COLOR = new THREE.Color(BODY_COLOR);
 
 export class Ghost {
   constructor(rift, scene, voice, typeName, type) {
@@ -105,7 +91,7 @@ export class Ghost {
     this.type = type;
     this.look = LOOKS[typeName];
     this.hitsLeft = type.hits;
-    this.phase = 'emerge';
+    this.phase = 'emerge';       // emerge -> chase
     this.alive = true;
     this.done = false;
     this.deathTime = 0;
@@ -130,10 +116,17 @@ export class Ghost {
       clippingPlanes: [this.clipPlane],
     });
 
-    this.mesh = new THREE.Group();
-    this.body = new THREE.Mesh(new THREE.BufferGeometry(), this.bodyMaterial);
-    this.look.build(this.body, this.featureMaterial, this.bodyMaterial);
+    this.body = new THREE.Mesh(this.look.body, this.bodyMaterial);
     this.body.scale.setScalar(Math.min(type.scale, FITS_THROUGH_RIFT));
+    for (const { geometry, position, scale, rotation, bodyColored } of this.look.features) {
+      const feature = new THREE.Mesh(geometry, bodyColored ? this.bodyMaterial : this.featureMaterial);
+      feature.position.set(...position);
+      if (scale) feature.scale.set(...scale);
+      if (rotation) feature.rotation.set(...rotation);
+      this.body.add(feature);
+    }
+
+    this.mesh = new THREE.Group();
     this.mesh.add(this.body);
     this.mesh.position.set(0, EMERGE_START, 0);
     rift.group.add(this.mesh);
@@ -187,7 +180,6 @@ export class Ghost {
     this.voice = null;
     this.rift.group.remove(this.mesh);
     this.scene.remove(this.shadow);
-    this.body.traverse((obj) => obj.geometry?.dispose());
     this.bodyMaterial.dispose();
     this.featureMaterial.dispose();
     this.shadow.geometry.dispose();
@@ -200,49 +192,46 @@ export class Ghost {
     this.time += dt;
 
     if (!this.alive) {
-      this.deathTime += dt;
-      const t = this.deathTime / 0.35;
-      this.mesh.scale.setScalar(1 + t * 0.9);
-      this.applyOpacity(Math.max(0, 0.9 * (1 - t)));
-      if (t >= 1) this.remove();
+      this.updateDeath(dt);
       return null;
     }
 
-    let result = null;
-    if (!paused) {
-      if (this.phase === 'emerge') {
-        this.mesh.position.y += this.type.speed * 0.7 * dt;
-        // Starts small enough to fit through the hole, reaching full size once out.
-        const progress = THREE.MathUtils.clamp(this.mesh.position.y / this.emergeEnd, 0, 1);
-        const narrow = Math.min(this.type.scale, FITS_THROUGH_RIFT);
-        this.body.scale.setScalar(narrow + (this.type.scale - narrow) * progress);
-        if (this.mesh.position.y >= this.emergeEnd) this.phase = 'chase';
-      } else {
-        this.getWorldPosition(worldPos);
-        toTarget.subVectors(viewerPos, worldPos);
-        const dist = toTarget.length();
-        if (dist < this.reachDistance) {
-          result = 'reached';
-        } else {
-          worldPos.addScaledVector(toTarget.divideScalar(dist), this.type.speed * dt);
-          this.rift.group.worldToLocal(worldPos);
-          this.mesh.position.copy(worldPos);
-        }
-      }
-    }
+    const reached = !paused && this.move(dt, viewerPos);
     this.updateClipping();
-
-    const { sway, swayAmount, weave } = this.look;
-    this.body.position.y = Math.sin(this.time * 2.2) * 0.015;
-    this.body.position.x = weave ? Math.sin(this.time * weave.speed) * weave.amount : 0;
-    this.body.rotation.z = Math.sin(this.time * sway) * swayAmount;
-    this.mesh.lookAt(viewerPos);
-
-    this.flash = Math.max(0, this.flash - dt);
-    this.bodyMaterial.color.copy(this.flash > 0 ? FLASH_COLOR : BASE_COLOR);
-
+    this.animate(dt, viewerPos);
     this.updateShadow(shadowSurface);
-    return result;
+    return reached ? 'reached' : null;
+  }
+
+  updateDeath(dt) {
+    this.deathTime += dt;
+    const t = this.deathTime / 0.35;
+    this.mesh.scale.setScalar(1 + t * 0.9);
+    this.bodyMaterial.opacity = Math.max(0, 0.9 * (1 - t));
+    this.featureMaterial.opacity = this.bodyMaterial.opacity;
+    if (t >= 1) this.remove();
+  }
+
+  // Returns true if the ghost has reached the player.
+  move(dt, viewerPos) {
+    if (this.phase === 'emerge') {
+      this.mesh.position.y += this.type.speed * 0.7 * dt;
+      // Starts small enough to fit through the hole, reaching full size once out.
+      const progress = THREE.MathUtils.clamp(this.mesh.position.y / this.emergeEnd, 0, 1);
+      const narrow = Math.min(this.type.scale, FITS_THROUGH_RIFT);
+      this.body.scale.setScalar(narrow + (this.type.scale - narrow) * progress);
+      if (this.mesh.position.y >= this.emergeEnd) this.phase = 'chase';
+      return false;
+    }
+
+    this.getWorldPosition(worldPos);
+    toTarget.subVectors(viewerPos, worldPos);
+    const distance = toTarget.length();
+    if (distance < this.reachDistance) return true;
+    worldPos.addScaledVector(toTarget.divideScalar(distance), this.type.speed * dt);
+    this.rift.group.worldToLocal(worldPos);
+    this.mesh.position.copy(worldPos);
+    return false;
   }
 
   updateClipping() {
@@ -254,9 +243,15 @@ export class Ghost {
     }
   }
 
-  applyOpacity(value) {
-    this.bodyMaterial.opacity = value;
-    this.featureMaterial.opacity = value;
+  animate(dt, viewerPos) {
+    const { sway, weave } = this.look;
+    this.body.position.y = Math.sin(this.time * 2.2) * 0.015;
+    this.body.position.x = weave ? Math.sin(this.time * weave.speed) * weave.amount : 0;
+    this.body.rotation.z = Math.sin(this.time * sway.speed) * sway.amount;
+    this.mesh.lookAt(viewerPos);
+
+    this.flash = Math.max(0, this.flash - dt);
+    this.bodyMaterial.color.copy(this.flash > 0 ? FLASH_COLOR : BODY_COLOR);
   }
 
   updateShadow(shadowSurface) {

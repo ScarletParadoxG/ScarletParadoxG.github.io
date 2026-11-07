@@ -9,7 +9,6 @@ export class SpatialAudio {
   constructor() {
     this.ctx = null;
     this.master = null;
-    this.voiceBus = null;
     this.voices = new Set();
     this.listenerPos = null;
     this.listenerFwd = null;
@@ -24,8 +23,6 @@ export class SpatialAudio {
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.9;
       this.master.connect(this.ctx.destination);
-      this.voiceBus = this.ctx.createGain();
-      this.voiceBus.connect(this.master);
     }
     this.ctx.resume().catch(() => {});
   }
@@ -33,11 +30,6 @@ export class SpatialAudio {
   // Quiet while the system menu is covering the game.
   setMuted(muted) {
     if (this.master) setParam(this.master.gain, muted ? 0 : 0.9, this.ctx);
-  }
-
-  // Quiet while the game is paused, leaving menu sounds audible.
-  setVoicesMuted(muted) {
-    if (this.voiceBus) setParam(this.voiceBus.gain, muted ? 0 : 1, this.ctx);
   }
 
   setListener(pos, fwd, up) {
@@ -64,7 +56,7 @@ export class SpatialAudio {
     panner.distanceModel = 'inverse';
     panner.refDistance = 0.8;
     panner.rolloffFactor = 1.2;
-    panner.connect(this.voiceBus);
+    panner.connect(this.master);
 
     const gain = ctx.createGain();
     gain.gain.value = 0;
