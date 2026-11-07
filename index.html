@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Ghost Hunter Test</title>
+  <link rel="stylesheet" href="css/style.css">
+
+  <script src="js/config.js"></script>
+  <script>
+    // Phones have no console, so uncaught errors are kept for the on-screen report.
+    window.__ghErrors = [];
+    function ghReportError(message) {
+      window.__ghErrors.push(message);
+      var el = document.getElementById('load-error');
+      if (el) { el.textContent = 'Error: ' + message; el.hidden = false; }
+    }
+    window.addEventListener('error', function (e) { ghReportError(e.message || 'Script failed to load'); });
+    window.addEventListener('unhandledrejection', function (e) { ghReportError(String(e.reason)); });
+
+    // The SDK can fire this before the app module has loaded, so keep it for later.
+    window.addEventListener('vlaunch-initialized', function (e) { window.__ghLaunch = e.detail; });
+
+    // Variant asks for its SDK to load in <head> before the 3D engine, so it has to block here.
+    if (window.GH_CONFIG.variantSdkKey) {
+      document.write('<script src="https://launchar.app/sdk/v1?key=' +
+        encodeURIComponent(window.GH_CONFIG.variantSdkKey) + '"><\/script>');
+    }
+  </script>
+  <script type="module" src="js/main.js"
+          onerror="ghReportError('Could not load the app code. Check your connection and reload.')"></script>
+</head>
+<body>
+  <div id="overlay">
+
+    <section id="menu">
+      <h1>Ghost Hunter</h1>
+      <p class="subtitle">Feature test build</p>
+      <p id="support-status" role="status">Checking WebXR support...</p>
+      <p id="load-error" class="error" hidden></p>
+      <div class="stack">
+        <button id="btn-enter" class="primary" disabled>Enter AR</button>
+        <button id="btn-probe">Probe features</button>
+        <div id="launch-links" class="stack"></div>
+        <button id="btn-copy-menu" hidden>Copy report</button>
+      </div>
+      <p class="hint">Headphones recommended. Sweep the phone over the room when AR starts.</p>
+      <pre id="report" hidden></pre>
+    </section>
+
+    <section id="ar-ui" hidden>
+      <div id="banner" role="status"></div>
+      <div id="arrow" hidden aria-hidden="true"></div>
+      <div id="flash" aria-hidden="true"></div>
+
+      <div id="top-actions" class="ui">
+        <button id="btn-panel" aria-expanded="false" aria-controls="panel">Diagnostics</button>
+        <button id="btn-exit">Exit</button>
+      </div>
+
+      <div id="panel" class="ui" hidden>
+        <pre id="diag"></pre>
+        <div class="row">
+          <label><input id="chk-debug" type="checkbox"> Debug view</label>
+          <label><input id="chk-arrow" type="checkbox" checked> Arrows</label>
+          <label><input id="chk-fade" type="checkbox" checked> Ray fade</label>
+        </div>
+        <label class="slider">Ghost brightness
+          <input id="rng-bright" type="range" min="0.3" max="1" step="0.05" value="1">
+        </label>
+        <div class="row">
+          <button id="btn-beep">Audio test</button>
+          <button id="btn-air">Air rift</button>
+          <button id="btn-copy">Copy report</button>
+        </div>
+      </div>
+
+      <div id="actions" class="ui">
+        <button id="btn-tap">Tap to place: off</button>
+        <button id="btn-spawn" hidden>Spawn ghost</button>
+        <button id="btn-primary" class="primary" disabled>Open rifts</button>
+      </div>
+    </section>
+
+  </div>
+</body>
+</html>

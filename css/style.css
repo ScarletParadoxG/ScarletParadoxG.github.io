@@ -1,0 +1,186 @@
+:root {
+  --bg: #12131c;
+  --panel: rgba(14, 15, 24, 0.82);
+  --text: #eef0f7;
+  --muted: #a4a9bd;
+  --accent: #8f7bff;
+  --accent-text: #0e0b22;
+  --danger: #ff6b6b;
+  --border: rgba(255, 255, 255, 0.18);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* The camera feed has to show through the page during a session. */
+html.in-ar, html.in-ar body, html.in-ar #overlay { background: transparent; }
+
+[hidden] { display: none !important; }
+
+#overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  background: var(--bg);
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button {
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+}
+button:focus-visible, a.button:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+
+a.button {
+  display: block;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+}
+
+pre {
+  margin: 0;
+  font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Menu */
+#menu {
+  height: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: max(24px, env(safe-area-inset-top)) 16px 24px;
+  overflow-y: auto;
+}
+h1 { margin: 0; font-size: 30px; line-height: 1.15; }
+.subtitle { margin: 2px 0 16px; color: var(--muted); }
+.stack { display: grid; gap: 10px; }
+.stack:empty { display: none; }
+.hint { margin: 14px 0; color: var(--muted); font-size: 13px; }
+.error { color: var(--danger); overflow-wrap: anywhere; }
+#report {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* AR UI */
+#ar-ui { position: absolute; inset: 0; pointer-events: none; }
+#ar-ui .ui, #ar-ui .ui * { pointer-events: auto; }
+
+#banner {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  left: 16px;
+  right: 16px;
+  margin-top: 54px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  text-align: center;
+  font-weight: 600;
+}
+#banner:empty { display: none; }
+#banner.warn { background: var(--danger); color: #1c0606; }
+
+#top-actions {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+#top-actions button, #actions button { background: var(--panel); }
+#actions button.primary { background: var(--accent); }
+
+#panel {
+  position: absolute;
+  top: calc(max(12px, env(safe-area-inset-top)) + 54px);
+  left: 16px;
+  right: 16px;
+  bottom: calc(max(12px, env(safe-area-inset-bottom)) + 66px);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: 10px;
+  background: var(--panel);
+  z-index: 2;
+}
+#diag { flex: 1; min-height: 0; overflow-y: auto; }
+.row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.row button { flex: 1 1 90px; }
+.row label { display: flex; gap: 6px; align-items: center; min-height: 32px; }
+.slider { display: grid; gap: 4px; }
+.slider input { width: 100%; }
+
+#actions {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  display: flex;
+  gap: 10px;
+}
+#actions button { flex: 1; }
+
+#arrow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  margin: -14px 0 0 -11px;
+  border-left: 11px solid transparent;
+  border-right: 11px solid transparent;
+  border-bottom: 28px solid var(--danger);
+  filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.8));
+}
+
+#flash {
+  position: absolute;
+  inset: 0;
+  background: var(--danger);
+  opacity: 0;
+  transition: opacity 0.35s ease-out;
+}
+#flash.on { opacity: 0.4; transition: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  #flash { transition: none; }
+}
