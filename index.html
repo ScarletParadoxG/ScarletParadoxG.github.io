@@ -3,54 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ghost Hunter Test</title>
+  <title>Ghost Hunter</title>
   <link rel="stylesheet" href="css/style.css">
-
-  <script src="js/config.js"></script>
-  <script>
-    // Uncaught errors are kept for the on-page report, since a headset has no easy console.
-    window.__ghErrors = [];
-    function ghReportError(message) {
-      window.__ghErrors.push(message);
-      var el = document.getElementById('load-error');
-      if (el) { el.textContent = 'Error: ' + message; el.hidden = false; }
-    }
-    window.addEventListener('error', function (e) { ghReportError(e.message || 'Script failed to load'); });
-    window.addEventListener('unhandledrejection', function (e) { ghReportError(String(e.reason)); });
-  </script>
   <script type="module" src="js/main.js"
-          onerror="ghReportError('Could not load the app code. Check your connection and reload.')"></script>
+          onerror="document.getElementById('status').textContent = 'The game could not load. Check your connection and reload.'"></script>
 </head>
 <body>
-  <main id="page">
+  <main>
     <h1>Ghost Hunter</h1>
-    <p class="subtitle">Quest test build</p>
-    <p id="support-status" role="status">Checking WebXR support...</p>
-    <p id="load-error" class="error" hidden></p>
+    <p class="tagline">Ghosts are tearing through your room. Listen for them, and shoot them before they reach you.</p>
 
-    <div class="actions">
-      <button id="btn-enter" class="primary" disabled>Enter AR</button>
-      <button id="btn-probe" disabled>Probe features</button>
-    </div>
+    <button id="btn-play" class="primary" disabled>Play</button>
+    <p id="status" role="status"></p>
+    <p id="best"></p>
 
-    <section class="notes">
-      <h2>Before you start</h2>
-      <p>Finish room setup on the headset, including your walls and furniture. Rifts open on those surfaces and on the floor.</p>
-      <p>Allow access to spatial data if the browser asks. Without it, the game can't see your room.</p>
-      <h2>Controls</h2>
-      <p>Aim with the laser and pull the trigger to select or shoot. Press grip to pause and open the menu.</p>
-      <h2>How to play</h2>
-      <p>Listen for ghosts and shoot them before they reach you. One touch ends the game. Rifts open and close as you play, and tougher ghosts join over time.</p>
-    </section>
+    <h2>Before you start</h2>
+    <p>Finish room setup on your headset, including your walls and furniture. Rifts open on those surfaces and on the floor. Allow access to spatial data if the browser asks.</p>
 
-    <section id="report-area" hidden>
-      <h2>Report</h2>
-      <div class="actions">
-        <button id="btn-copy">Copy report</button>
-        <button id="btn-save">Save as file</button>
-      </div>
-      <pre id="report"></pre>
-    </section>
+    <h2>How to play</h2>
+    <p>Aim with the laser and pull the trigger to shoot. Press grip to pause. One touch from a ghost ends the game, and tougher ghosts join the longer you survive.</p>
+
+    <h2>Know your enemies</h2>
+    <ul>
+      <li><strong>Ghost:</strong> round with two eyes. Takes 2 hits.</li>
+      <li><strong>Wisp:</strong> a fast, weaving teardrop with one eye. Takes 1 hit.</li>
+      <li><strong>Brute:</strong> huge, slow, horned and toothy. Takes 5 hits.</li>
+    </ul>
   </main>
 </body>
 </html>

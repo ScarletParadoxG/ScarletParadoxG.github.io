@@ -4,7 +4,6 @@
   --muted: #a4a9bd;
   --accent: #8f7bff;
   --accent-text: #0e0b22;
-  --danger: #ff6b6b;
   --border: rgba(255, 255, 255, 0.18);
 }
 
@@ -18,39 +17,33 @@ html, body {
   font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
-[hidden] { display: none !important; }
-
-#page {
-  max-width: 720px;
+main {
+  max-width: 640px;
   margin: 0 auto;
-  padding: 32px 16px 48px;
+  padding: 40px 16px 48px;
 }
 
-h1 { margin: 0; font-size: 36px; line-height: 1.15; }
-h2 { margin: 24px 0 6px; font-size: 19px; }
-p { margin: 0 0 10px; }
+h1 { margin: 0 0 8px; font-size: 40px; line-height: 1.15; }
+h2 { margin: 28px 0 6px; font-size: 19px; }
+p { margin: 0 0 10px; color: var(--muted); }
+ul { margin: 0; padding-left: 20px; color: var(--muted); }
+li { margin-bottom: 4px; }
+strong { color: var(--text); }
 
-.subtitle { margin: 2px 0 18px; color: var(--muted); }
-.error { color: var(--danger); overflow-wrap: anywhere; }
-.notes p { color: var(--muted); }
+.tagline { margin-bottom: 20px; }
+#status:empty, #best:empty { display: none; }
+#status, #best { margin-top: 12px; color: var(--text); }
 
-.actions {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
-  margin: 16px 0;
-}
-
-/* Large targets, because a laser pointer is less precise than a mouse. */
+/* A large target, because a laser pointer is less precise than a mouse. */
 button {
-  min-height: 60px;
+  width: 100%;
+  min-height: 64px;
   padding: 12px 18px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text);
   font: inherit;
-  font-weight: 600;
+  font-size: 20px;
+  font-weight: 700;
   cursor: pointer;
 }
 button:focus-visible {
@@ -59,14 +52,3 @@ button:focus-visible {
 }
 button:disabled { opacity: 0.45; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-
-pre {
-  margin: 0;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.05);
-  font: 14px/1.45 ui-monospace, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}

@@ -2,7 +2,7 @@
 import * as THREE from './three.js';
 
 const WIDTH = 1024;
-const HEIGHT = 900;
+const HEIGHT = 620;
 const PANEL_WIDTH_M = 0.72;
 const PANEL_HEIGHT_M = PANEL_WIDTH_M * (HEIGHT / WIDTH);
 const PAD = 40;

@@ -9,6 +9,7 @@ export class SpatialAudio {
   constructor() {
     this.ctx = null;
     this.master = null;
+    this.voiceBus = null;
     this.voices = new Set();
     this.listenerPos = null;
     this.listenerFwd = null;
@@ -26,25 +27,17 @@ export class SpatialAudio {
       this.voiceBus = this.ctx.createGain();
       this.voiceBus.connect(this.master);
     }
-    this.resume();
-  }
-
-  resume() {
-    if (this.ctx && this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
+    this.ctx.resume().catch(() => {});
   }
 
   // Quiet while the system menu is covering the game.
   setMuted(muted) {
-    if (this.master) this.master.gain.setTargetAtTime(muted ? 0 : 0.9, this.ctx.currentTime, 0.05);
+    if (this.master) setParam(this.master.gain, muted ? 0 : 0.9, this.ctx);
   }
 
-  // Quiet while the game is paused. The menu's audio test and button sounds still play.
+  // Quiet while the game is paused, leaving menu sounds audible.
   setVoicesMuted(muted) {
-    if (this.voiceBus) this.voiceBus.gain.setTargetAtTime(muted ? 0 : 1, this.ctx.currentTime, 0.05);
-  }
-
-  get state() {
-    return this.ctx ? this.ctx.state : 'not started';
+    if (this.voiceBus) setParam(this.voiceBus.gain, muted ? 0 : 1, this.ctx);
   }
 
   setListener(pos, fwd, up) {
@@ -62,29 +55,17 @@ export class SpatialAudio {
     }
   }
 
-  makePanner(destination = this.master) {
-    const panner = this.ctx.createPanner();
+  // A wavering moan. Sawtooth keeps the high frequencies the ear uses to locate sound.
+  createVoice(pitch) {
+    if (!this.ctx) return null;
+    const { ctx } = this;
+    const panner = ctx.createPanner();
     panner.panningModel = 'HRTF';
     panner.distanceModel = 'inverse';
     panner.refDistance = 0.8;
     panner.rolloffFactor = 1.2;
-    panner.connect(destination);
-    return panner;
-  }
+    panner.connect(this.voiceBus);
 
-  static placePanner(panner, p) {
-    if (panner.positionX) {
-      panner.positionX.value = p.x; panner.positionY.value = p.y; panner.positionZ.value = p.z;
-    } else {
-      panner.setPosition(p.x, p.y, p.z);
-    }
-  }
-
-  // A wavering moan. Sawtooth keeps the high frequencies the ear uses to locate sound.
-  createVoice(pitch = 180) {
-    if (!this.ctx) return null;
-    const { ctx } = this;
-    const panner = this.makePanner(this.voiceBus);
     const gain = ctx.createGain();
     gain.gain.value = 0;
     gain.gain.setTargetAtTime(0.32, ctx.currentTime, 0.4);
@@ -115,7 +96,13 @@ export class SpatialAudio {
 
     const voice = {
       update: (position) => {
-        SpatialAudio.placePanner(panner, position);
+        if (panner.positionX) {
+          panner.positionX.value = position.x;
+          panner.positionY.value = position.y;
+          panner.positionZ.value = position.z;
+        } else {
+          panner.setPosition(position.x, position.y, position.z);
+        }
         if (!this.listenerPos) return;
         const height = Math.max(-1.5, Math.min(1.5, position.y - this.listenerPos.y));
         oscillators.forEach((osc) => setParam(osc.frequency, base * 2 ** height, ctx));
@@ -136,28 +123,6 @@ export class SpatialAudio {
     };
     this.voices.add(voice);
     return voice;
-  }
-
-  // A short positioned burst for the direction test.
-  beepAt(position) {
-    if (!this.ctx) return;
-    const { ctx } = this;
-    const panner = this.makePanner();
-    SpatialAudio.placePanner(panner, position);
-    const gain = ctx.createGain();
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.value = 330;
-    const t = ctx.currentTime;
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(0.5, t + 0.02);
-    gain.gain.setValueAtTime(0.5, t + 0.45);
-    gain.gain.linearRampToValueAtTime(0, t + 0.5);
-    osc.connect(gain);
-    gain.connect(panner);
-    osc.start(t);
-    osc.stop(t + 0.52);
-    setTimeout(() => panner.disconnect(), 800);
   }
 
   // Non-directional feedback for hits and misses.
